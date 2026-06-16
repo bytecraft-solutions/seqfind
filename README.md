@@ -5,6 +5,17 @@ FASTA files. It is built as the core of a future bioinformatics agent: the
 binary performs the actual work, and later AI/MCP layers can route requests to
 these tested operations.
 
+## Monorepo layout
+
+This repo is a Cargo workspace (Rust) plus a pnpm/Turborepo workspace (JS):
+
+- `crates/seqfind-core` -shared library with the search/ORF/FASTA core.
+- `apps/cli` -`seqfind` CLI binary (clap dispatcher over `seqfind-core`).
+- `apps/api` -`seqfind-api` axum HTTP server over `seqfind-core`.
+- `apps/web` -Vite + React + TS SPA; dev-proxies `/api` to `localhost:8080`.
+
+Build everything: `cargo build --workspace` and `pnpm install && turbo run build`.
+
 ## Current Features
 
 - Fetch FASTA records from NCBI Nucleotide with streamed writes for large files.
