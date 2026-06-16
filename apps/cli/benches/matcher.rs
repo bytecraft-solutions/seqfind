@@ -9,8 +9,8 @@
 //! Run with: `cargo bench --bench matcher`
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use seqfind::index::ReferenceIndex;
-use seqfind::matcher::{
+use seqfind_core::index::ReferenceIndex;
+use seqfind_core::matcher::{
     exact_match_positions, find_matches, find_matches_with_max_edits, reverse_complement,
 };
 

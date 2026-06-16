@@ -1,0 +1,19 @@
+[package]
+name = "seqfind-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+csv = { workspace = true }
+bio = { workspace = true }
+noodles-fasta = { workspace = true }
+ureq = { workspace = true }
+libc = { workspace = true }
+postgres = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
