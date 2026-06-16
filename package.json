@@ -5,9 +5,14 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
-    "lint": "turbo run lint"
+    "lint": "turbo run lint",
+    "dev:api": "cargo run -p seqfind-api",
+    "dev:web": "pnpm --filter web dev",
+    "dev:cli": "cargo watch -p seqfind -x build",
+    "dev:all": "concurrently -n api,web,cli -c blue,magenta,yellow \"pnpm dev:api\" \"pnpm dev:web\" \"pnpm dev:cli\""
   },
   "devDependencies": {
+    "concurrently": "^9.0.0",
     "turbo": "^2.0.0"
   }
 }

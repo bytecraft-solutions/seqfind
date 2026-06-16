@@ -2,8 +2,10 @@
 //! with negative-index support (counted from the end), matching SeqKit's semantics.
 
 use crate::matcher;
+use crate::regions::GenomicRegion;
 use crate::seq::SeqRecord;
 use anyhow::{Result, bail};
+use std::collections::HashMap;
 
 /// SeqKit-style 1-based inclusive coordinates. Negative values count from the end:
 /// `-1` is the last base, `-30:-1` is the last 30 bases.
@@ -90,6 +92,62 @@ pub fn subseq_record(record: &SeqRecord, opts: &SubseqOptions) -> Result<Option<
     }))
 }
 
+/// Extract every `regions` entry from the matching record by seqid. Returns one
+/// SeqRecord per region (skipping regions whose seqid is missing or whose
+/// coordinates fall outside the record). For `-` strand regions the slice is
+/// reverse-complemented before being emitted.
+pub fn subseq_by_regions(
+    records: &[SeqRecord],
+    regions: &[GenomicRegion],
+) -> Result<Vec<SeqRecord>> {
+    let by_name: HashMap<&str, &SeqRecord> = records.iter().map(|r| (r.name.as_str(), r)).collect();
+    let mut out = Vec::with_capacity(regions.len());
+    for region in regions {
+        let Some(rec) = by_name.get(region.seqid.as_str()) else {
+            eprintln!(
+                "warning: region {}:{}-{} has no matching record",
+                region.seqid, region.start, region.end
+            );
+            continue;
+        };
+        let len = rec.sequence.len() as u64;
+        if region.start == 0 || region.end > len || region.end < region.start {
+            eprintln!(
+                "warning: region {}:{}-{} out of bounds for record length {}",
+                region.seqid, region.start, region.end, len
+            );
+            continue;
+        }
+        let s = (region.start - 1) as usize;
+        let e = region.end as usize;
+        let mut slice = rec.sequence[s..e].to_string();
+        let mut qual = rec.quality.as_ref().map(|q| q[s..e].to_vec());
+        let is_rc = region.strand == '-';
+        if is_rc {
+            slice = matcher::reverse_complement(&slice);
+            if let Some(q) = qual.as_mut() {
+                q.reverse();
+            }
+        }
+        let label = if region.label.is_empty() || region.label == "." {
+            String::new()
+        } else {
+            format!("|{}", region.label)
+        };
+        let suffix = if is_rc { ":-" } else { "" };
+        let name = format!(
+            "{}:{}-{}{suffix}{label}",
+            rec.name, region.start, region.end
+        );
+        out.push(SeqRecord {
+            name,
+            sequence: slice,
+            quality: qual,
+        });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +188,34 @@ mod tests {
         .unwrap();
         assert_eq!(out.sequence, "CGTA");
         assert!(out.name.contains(":2-5"));
+    }
+
+    #[test]
+    fn subseq_by_regions_basic() {
+        let recs = vec![rec("chr1", "AAACGTAAA")];
+        let regions = vec![
+            GenomicRegion {
+                seqid: "chr1".into(),
+                start: 4,
+                end: 6,
+                strand: '+',
+                label: "featA".into(),
+            },
+            GenomicRegion {
+                seqid: "chr1".into(),
+                start: 1,
+                end: 3,
+                strand: '-',
+                label: ".".into(),
+            },
+        ];
+        let out = subseq_by_regions(&recs, &regions).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].sequence, "CGT");
+        assert!(out[0].name.contains("|featA"));
+        // RC of "AAA" = "TTT"
+        assert_eq!(out[1].sequence, "TTT");
+        assert!(out[1].name.ends_with(":-"));
     }
 
     #[test]

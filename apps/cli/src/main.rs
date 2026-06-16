@@ -2,8 +2,9 @@ mod cli;
 
 #[allow(unused_imports)]
 use seqfind_core::{
-    alphabets, convert as core_convert, db, digest, edit as core_edit, index, locate, matcher,
-    motif, ncbi, orf, output, select, seq, subseq as core_subseq, summary, transform,
+    alphabets, amplicon as core_amplicon, convert as core_convert, db, digest, edit as core_edit,
+    faidx as core_faidx, index, locate, matcher, motif, ncbi, orf, output, regions as core_regions,
+    select, seq, subseq as core_subseq, summary, transform,
 };
 
 use anyhow::{Result, bail};
@@ -656,6 +657,11 @@ fn command_label(command: &Command) -> &'static str {
         Command::Sum { .. } => "sum",
         Command::Replace { .. } => "replace",
         Command::Rename { .. } => "rename",
+        Command::Concat { .. } => "concat",
+        Command::Restart { .. } => "restart",
+        Command::Mutate { .. } => "mutate",
+        Command::Amplicon { .. } => "amplicon",
+        Command::Faidx { .. } => "faidx",
     }
 }
 
@@ -1191,26 +1197,47 @@ fn run_command(command: Command) -> Result<()> {
         Command::Subseq {
             file,
             region,
+            bed,
+            gff,
+            gtf,
             up_stream,
             down_stream,
             reverse_complement,
             out,
             format,
         } => {
-            let region = core_subseq::Region::parse(&region)?;
-            let opts = core_subseq::SubseqOptions {
-                region,
-                reverse_complement,
-                up_stream,
-                down_stream,
-            };
             let records = seq::read_seqs(&file)?;
-            let mut extracted = Vec::with_capacity(records.len());
-            for r in &records {
-                if let Some(out_rec) = core_subseq::subseq_record(r, &opts)? {
-                    extracted.push(out_rec);
+            let region_file = bed
+                .as_ref()
+                .map(|p| ("bed", p.as_path()))
+                .or_else(|| gff.as_ref().map(|p| ("gff", p.as_path())))
+                .or_else(|| gtf.as_ref().map(|p| ("gtf", p.as_path())));
+            let extracted = if let Some((kind, path)) = region_file {
+                let regions = match kind {
+                    "bed" => core_regions::read_bed(path)?,
+                    "gff" => core_regions::read_gff_or_gtf(path, "GFF")?,
+                    "gtf" => core_regions::read_gff_or_gtf(path, "GTF")?,
+                    _ => unreachable!(),
+                };
+                core_subseq::subseq_by_regions(&records, &regions)?
+            } else {
+                let region_str = region
+                    .ok_or_else(|| anyhow::anyhow!("pass --region, --bed, --gff, or --gtf"))?;
+                let region = core_subseq::Region::parse(&region_str)?;
+                let opts = core_subseq::SubseqOptions {
+                    region,
+                    reverse_complement,
+                    up_stream,
+                    down_stream,
+                };
+                let mut out = Vec::with_capacity(records.len());
+                for r in &records {
+                    if let Some(rec) = core_subseq::subseq_record(r, &opts)? {
+                        out.push(rec);
+                    }
                 }
-            }
+                out
+            };
             emit_records(&extracted, out.as_deref(), format)?;
         }
 
@@ -1242,6 +1269,134 @@ fn run_command(command: Command) -> Result<()> {
             let (renamed, n) = core_edit::rename_duplicates(&records);
             eprintln!("rename: {n} record(s) renamed");
             emit_records(&renamed, out.as_deref(), format)?;
+        }
+
+        Command::Concat {
+            file,
+            by_order,
+            out,
+            format,
+        } => {
+            let mut groups = Vec::with_capacity(file.len());
+            for path in &file {
+                groups.push(seq::read_seqs(path)?);
+            }
+            let by = if by_order {
+                core_edit::ConcatBy::Order
+            } else {
+                core_edit::ConcatBy::Id
+            };
+            let merged = core_edit::concat(&groups, by)?;
+            emit_records(&merged, out.as_deref(), format)?;
+        }
+
+        Command::Restart {
+            file,
+            position,
+            out,
+            format,
+        } => {
+            let records = seq::read_seqs(&file)?;
+            let rotated = core_edit::restart(&records, position)?;
+            emit_records(&rotated, out.as_deref(), format)?;
+        }
+
+        Command::Mutate {
+            file,
+            point,
+            deletion,
+            insertion,
+            out,
+            format,
+        } => {
+            let mut muts = Vec::new();
+            for s in &point {
+                muts.push(core_edit::Mutation::parse_point(s)?);
+            }
+            for s in &deletion {
+                muts.push(core_edit::Mutation::parse_deletion(s)?);
+            }
+            for s in &insertion {
+                muts.push(core_edit::Mutation::parse_insertion(s)?);
+            }
+            if muts.is_empty() {
+                bail!("provide at least one --point, --deletion, or --insertion");
+            }
+            let records = seq::read_seqs(&file)?;
+            let mutated = core_edit::mutate(&records, &muts)?;
+            emit_records(&mutated, out.as_deref(), format)?;
+        }
+
+        Command::Amplicon {
+            file,
+            forward,
+            reverse,
+            both_strands,
+            max_length,
+            out,
+            format,
+        } => {
+            let records = seq::read_seqs(&file)?;
+            let opts = core_amplicon::AmpliconOptions {
+                forward: forward.to_ascii_uppercase(),
+                reverse: reverse.to_ascii_uppercase(),
+                both_strands,
+                max_length,
+            };
+            let amps = core_amplicon::find_amplicons(&records, &opts)?;
+            let recs: Vec<seq::SeqRecord> = amps
+                .iter()
+                .map(|a| seq::SeqRecord {
+                    name: format!(
+                        "{}:{}-{}{}",
+                        a.record,
+                        a.start + 1,
+                        a.end,
+                        if a.strand == "-" { ":-" } else { "" }
+                    ),
+                    sequence: a.sequence.clone(),
+                    quality: None,
+                })
+                .collect();
+            eprintln!("amplicon: {} extracted", recs.len());
+            emit_records(&recs, out.as_deref(), format)?;
+        }
+
+        Command::Faidx {
+            file,
+            region,
+            out,
+            wrap,
+            force,
+        } => {
+            let fai_path = core_faidx::default_fai_path(&file);
+            let index = if fai_path.exists() && !force {
+                core_faidx::FaiIndex::load(&fai_path)?
+            } else {
+                let idx = core_faidx::build_index(&file)?;
+                let mut w = std::fs::File::create(&fai_path)?;
+                idx.write_to(&mut w)?;
+                eprintln!("✓ wrote {}", fai_path.display());
+                idx
+            };
+            if region.is_empty() {
+                return Ok(());
+            }
+            let mut writer = seq::open_output(out.as_deref())?;
+            for raw in &region {
+                let mut r = core_faidx::Region::parse(raw)?;
+                // Fill end sentinel with record length.
+                if r.end == 0 {
+                    let entry = index
+                        .find(&r.name)
+                        .ok_or_else(|| anyhow::anyhow!("record '{}' not in index", r.name))?;
+                    r.end = entry.length;
+                }
+                let seq_str = core_faidx::fetch_region(&file, &index, &r)?;
+                let name = format!("{}:{}-{}", r.name, r.start, r.end);
+                seq::write_fasta_record(&mut writer, &name, &seq_str, wrap)?;
+            }
+            writer.flush()?;
         }
     }
 

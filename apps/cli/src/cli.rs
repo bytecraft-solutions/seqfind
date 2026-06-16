@@ -450,8 +450,18 @@ pub enum Command {
         #[arg(short, long)]
         file: PathBuf,
         /// `START:END` (1-based inclusive). Negatives count from the end.
-        #[arg(short, long)]
-        region: String,
+        /// Required unless one of --bed/--gff/--gtf is set.
+        #[arg(short, long, conflicts_with_all = ["bed", "gff", "gtf"])]
+        region: Option<String>,
+        /// BED region file (chrom\tstart\tend; 0-based half-open).
+        #[arg(long, conflicts_with_all = ["gff", "gtf"])]
+        bed: Option<PathBuf>,
+        /// GFF3 region file (1-based inclusive).
+        #[arg(long, conflicts_with_all = ["bed", "gtf"])]
+        gff: Option<PathBuf>,
+        /// GTF region file (1-based inclusive).
+        #[arg(long, conflicts_with_all = ["bed", "gff"])]
+        gtf: Option<PathBuf>,
         /// Bases of upstream context to include.
         #[arg(long, default_value_t = 0)]
         up_stream: usize,
@@ -502,6 +512,95 @@ pub enum Command {
         out: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = RecordFormat::Auto)]
         format: RecordFormat,
+    },
+
+    /// Concatenate corresponding records from multiple files (SeqKit's `concat`).
+    Concat {
+        /// Two or more input files. Records are paired by ID by default.
+        /// Repeat the flag (`--file a --file b`) or pass several values
+        /// (`--file a b`).
+        #[arg(short, long, required = true, num_args = 1.., action = clap::ArgAction::Append)]
+        file: Vec<PathBuf>,
+        /// Pair records by index order instead of ID.
+        #[arg(long)]
+        by_order: bool,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = RecordFormat::Auto)]
+        format: RecordFormat,
+    },
+
+    /// Rotate circular genomes so each record starts at 1-based POSITION (SeqKit's `restart`).
+    Restart {
+        #[arg(short, long)]
+        file: PathBuf,
+        /// 1-based position to rotate to the start of the record.
+        #[arg(short, long)]
+        position: usize,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = RecordFormat::Auto)]
+        format: RecordFormat,
+    },
+
+    /// Apply explicit point / deletion / insertion mutations (SeqKit's `mutate`).
+    Mutate {
+        #[arg(short, long)]
+        file: PathBuf,
+        /// Point mutation `POS:BASE` (1-based). Repeat for multiple.
+        #[arg(long = "point")]
+        point: Vec<String>,
+        /// Deletion `START:END` (1-based inclusive). Repeat for multiple.
+        #[arg(long = "deletion")]
+        deletion: Vec<String>,
+        /// Insertion `POS:BASES` (1-based). Repeat for multiple.
+        #[arg(long = "insertion")]
+        insertion: Vec<String>,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = RecordFormat::Auto)]
+        format: RecordFormat,
+    },
+
+    /// Extract amplicons defined by a forward+reverse primer pair (SeqKit's `amplicon`).
+    Amplicon {
+        #[arg(short, long)]
+        file: PathBuf,
+        /// Forward primer (5'→3'). IUPAC codes allowed.
+        #[arg(short = 'F', long)]
+        forward: String,
+        /// Reverse primer (5'→3'). Its RC is searched on the forward strand.
+        #[arg(short = 'R', long)]
+        reverse: String,
+        /// Scan the reverse strand as well.
+        #[arg(long)]
+        both_strands: bool,
+        /// Drop amplicons longer than this many bases.
+        #[arg(long)]
+        max_length: Option<usize>,
+        /// Output extracted amplicons as records.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = RecordFormat::Auto)]
+        format: RecordFormat,
+    },
+
+    /// Build a .fai index and fetch random-access regions (SeqKit's `faidx`).
+    Faidx {
+        #[arg(short, long)]
+        file: PathBuf,
+        /// One or more `chr` or `chr:start-end` (1-based inclusive) regions.
+        /// If omitted, just builds/refreshes the .fai index.
+        #[arg()]
+        region: Vec<String>,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Wrap width for output FASTA. 0 disables wrapping.
+        #[arg(long, default_value_t = 70)]
+        wrap: usize,
+        /// Always rebuild the .fai index even if one exists.
+        #[arg(long)]
+        force: bool,
     },
 }
 
