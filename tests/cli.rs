@@ -416,6 +416,69 @@ fn motif_unknown_name_errors() {
 }
 
 #[test]
+fn compare_json_supports_multiple_query_files() {
+    let mut reference = NamedTempFile::new().unwrap();
+    writeln!(reference, ">ref1\nAAATTTCCCGGGACGCAT").unwrap();
+
+    let mut query_a = NamedTempFile::new().unwrap();
+    writeln!(query_a, ">marker_a\nTTTCCC").unwrap();
+
+    let mut query_b = NamedTempFile::new().unwrap();
+    writeln!(query_b, ">marker_b\nATGCGT").unwrap();
+
+    let out = bin()
+        .args(["compare", "--reference"])
+        .arg(reference.path())
+        .args(["--query"])
+        .arg(query_a.path())
+        .args(["--query"])
+        .arg(query_b.path())
+        .args(["--reverse-complement", "--format", "json", "--time"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("compare took:"))
+        .get_output()
+        .stdout
+        .clone();
+
+    let v: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+
+    assert_eq!(arr[0]["reference_record"], "ref1");
+    assert_eq!(arr[0]["query_record"], "marker_a");
+    assert_eq!(arr[0]["start"], 3);
+    assert_eq!(arr[0]["end"], 9);
+    assert_eq!(arr[0]["strand"], "+");
+    assert_eq!(arr[0]["query_length"], 6);
+
+    assert_eq!(arr[1]["query_record"], "marker_b");
+    assert_eq!(arr[1]["start"], 12);
+    assert_eq!(arr[1]["end"], 18);
+    assert_eq!(arr[1]["strand"], "-");
+}
+
+#[test]
+fn compare_bed_uses_reference_coordinates() {
+    let mut reference = NamedTempFile::new().unwrap();
+    writeln!(reference, ">ref1\nAAATTTCCC").unwrap();
+
+    let mut query = NamedTempFile::new().unwrap();
+    writeln!(query, ">marker_a\nTTTCCC").unwrap();
+
+    bin()
+        .args(["compare", "--reference"])
+        .arg(reference.path())
+        .args(["--query"])
+        .arg(query.path())
+        .args(["--format", "bed"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ref1\t3\t9\t"))
+        .stdout(predicate::str::contains(":marker_a\t6\t+"));
+}
+
+#[test]
 fn search_save_db_via_env() {
     let Some(url) = pg_available() else {
         eprintln!("skipping: no Postgres at {}", pg_url());
@@ -556,6 +619,19 @@ fn fetch_rejects_garbage_accession() {
         .arg(&out)
         .assert()
         .failure();
+}
+
+#[test]
+fn fetch_rejects_zero_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.fna");
+    bin()
+        .args(["fetch", "--accession", "NC_001416.1", "--out"])
+        .arg(&out)
+        .args(["--timeout-seconds", "0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("fetch timeout"));
 }
 
 #[test]

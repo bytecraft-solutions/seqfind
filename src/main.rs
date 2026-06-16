@@ -180,6 +180,69 @@ fn run_search(
     maybe_save_hits(save_db, subcommand_label, file, params, &all_hits)
 }
 
+fn run_compare(
+    reference: &Path,
+    query_files: &[PathBuf],
+    reverse_complement: bool,
+    format: SearchFormat,
+) -> Result<()> {
+    if query_files.is_empty() {
+        bail!("at least one --query FASTA file is required");
+    }
+
+    let reference_records = fasta::read_fasta(reference)?;
+    let reference_file = reference.to_string_lossy().into_owned();
+    let mut all_hits = Vec::new();
+
+    for query_file in query_files {
+        let query_records = fasta::read_fasta(query_file)?;
+        let query_file_label = query_file.to_string_lossy().into_owned();
+
+        for query_record in &query_records {
+            if query_record.sequence.is_empty() {
+                bail!(
+                    "query record '{}' in {} is empty",
+                    query_record.name,
+                    query_file.display()
+                );
+            }
+
+            for reference_record in &reference_records {
+                let hits = matcher::find_matches(
+                    &reference_record.name,
+                    &reference_record.sequence,
+                    &query_record.sequence,
+                    reverse_complement,
+                );
+
+                for hit in hits {
+                    all_hits.push(output::CompareHit {
+                        reference_file: reference_file.clone(),
+                        reference_record: hit.record,
+                        query_file: query_file_label.clone(),
+                        query_record: query_record.name.clone(),
+                        start: hit.start,
+                        end: hit.end,
+                        strand: hit.strand,
+                        matched: hit.matched,
+                        query_length: query_record.sequence.len(),
+                    });
+                }
+            }
+        }
+    }
+
+    match format {
+        SearchFormat::Text => output::print_compare_text(&all_hits),
+        SearchFormat::Json => output::print_compare_json(&all_hits)?,
+        SearchFormat::Csv => output::print_compare_csv(&all_hits)?,
+        SearchFormat::Tsv => output::print_compare_tsv(&all_hits)?,
+        SearchFormat::Bed => output::print_compare_bed(&all_hits)?,
+    }
+
+    Ok(())
+}
+
 fn command_label(command: &Command) -> &'static str {
     match command {
         Command::Search { .. } => "search",
@@ -187,6 +250,7 @@ fn command_label(command: &Command) -> &'static str {
         Command::Rc { .. } => "rc",
         Command::Orf { .. } => "orf",
         Command::Motif { .. } => "motif",
+        Command::Compare { .. } => "compare",
         Command::Fetch { .. } => "fetch",
         Command::Runs {
             action: RunsAction::List { .. },
@@ -347,11 +411,23 @@ fn run_command(command: Command) -> Result<()> {
             )?;
         }
 
-        Command::Fetch { accession, out } => {
+        Command::Compare {
+            reference,
+            query,
+            reverse_complement,
+            format,
+        } => run_compare(&reference, &query, reverse_complement, format)?,
+
+        Command::Fetch {
+            accession,
+            out,
+            timeout_seconds,
+        } => {
             let out_path = out.unwrap_or_else(|| {
                 PathBuf::from(format!("data/{}.fna", accession.replace('/', "_")))
             });
-            let bytes = ncbi::fetch_fasta(&accession, &out_path)?;
+            let bytes =
+                ncbi::fetch_fasta(&accession, &out_path, Duration::from_secs(timeout_seconds))?;
             eprintln!(
                 "✓ fetched {} ({} bytes) → {}",
                 accession,

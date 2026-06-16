@@ -149,6 +149,25 @@ pub enum Command {
         save_db: Option<String>,
     },
 
+    /// Search one or more query FASTA files inside a reference FASTA file
+    Compare {
+        /// Reference FASTA file to search within
+        #[arg(short, long)]
+        reference: PathBuf,
+
+        /// Query FASTA file(s) to search for. Repeat --query for multiple files.
+        #[arg(short, long, required = true, num_args = 1..)]
+        query: Vec<PathBuf>,
+
+        /// Also search the reverse complement strand
+        #[arg(long)]
+        reverse_complement: bool,
+
+        /// Output format
+        #[arg(long, value_enum, default_value_t = SearchFormat::Text)]
+        format: SearchFormat,
+    },
+
     /// Download a FASTA record from NCBI by accession (e.g. NC_045512.2)
     Fetch {
         /// NCBI Nucleotide accession (e.g. NC_000913.3 for E. coli)
@@ -158,6 +177,10 @@ pub enum Command {
         /// Output FASTA path (default: data/<accession>.fna)
         #[arg(short, long)]
         out: Option<PathBuf>,
+
+        /// Read timeout in seconds for large NCBI downloads
+        #[arg(long, default_value_t = 1_800)]
+        timeout_seconds: u64,
     },
 
     /// Inspect past runs stored in the database

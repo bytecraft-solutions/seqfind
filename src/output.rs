@@ -17,6 +17,19 @@ pub struct RecordStats {
     pub n: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CompareHit {
+    pub reference_file: String,
+    pub reference_record: String,
+    pub query_file: String,
+    pub query_record: String,
+    pub start: usize,
+    pub end: usize,
+    pub strand: String,
+    pub matched: String,
+    pub query_length: usize,
+}
+
 pub fn compute_stats(record: &FastaRecord) -> RecordStats {
     let mut a = 0usize;
     let mut t = 0usize;
@@ -113,6 +126,96 @@ pub fn print_hits_bed(hits: &[Hit]) -> Result<()> {
             &h.end.to_string(),
             h.matched.as_str(),
             "0",
+            h.strand.as_str(),
+        ])?;
+    }
+    wtr.flush()?;
+    Ok(())
+}
+
+// --- compare output -----------------------------------------------------
+
+pub fn print_compare_text(hits: &[CompareHit]) {
+    if hits.is_empty() {
+        println!("No compare matches found.");
+        return;
+    }
+    for hit in hits {
+        println!(
+            "{}:{}\tstart={}\tend={}\tstrand={}\tquery_file={}\tquery_record={}\tquery_length={}\tmatched={}",
+            hit.reference_file,
+            hit.reference_record,
+            hit.start,
+            hit.end,
+            hit.strand,
+            hit.query_file,
+            hit.query_record,
+            hit.query_length,
+            hit.matched
+        );
+    }
+}
+
+pub fn print_compare_json(hits: &[CompareHit]) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(hits)?);
+    Ok(())
+}
+
+fn write_compare_delimited(hits: &[CompareHit], delimiter: u8) -> Result<()> {
+    let mut wtr = csv::WriterBuilder::new()
+        .delimiter(delimiter)
+        .from_writer(std::io::stdout());
+    wtr.write_record([
+        "reference_file",
+        "reference_record",
+        "query_file",
+        "query_record",
+        "start",
+        "end",
+        "strand",
+        "matched",
+        "query_length",
+    ])?;
+    for h in hits {
+        wtr.write_record([
+            h.reference_file.as_str(),
+            h.reference_record.as_str(),
+            h.query_file.as_str(),
+            h.query_record.as_str(),
+            &h.start.to_string(),
+            &h.end.to_string(),
+            h.strand.as_str(),
+            h.matched.as_str(),
+            &h.query_length.to_string(),
+        ])?;
+    }
+    wtr.flush()?;
+    Ok(())
+}
+
+pub fn print_compare_csv(hits: &[CompareHit]) -> Result<()> {
+    write_compare_delimited(hits, b',')
+}
+
+pub fn print_compare_tsv(hits: &[CompareHit]) -> Result<()> {
+    write_compare_delimited(hits, b'\t')
+}
+
+/// BED3+3 over reference coordinates. Name is `query_file:query_record`;
+/// score is the query length.
+pub fn print_compare_bed(hits: &[CompareHit]) -> Result<()> {
+    let mut wtr = csv::WriterBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(false)
+        .from_writer(std::io::stdout());
+    for h in hits {
+        let name = format!("{}:{}", h.query_file, h.query_record);
+        wtr.write_record([
+            h.reference_record.as_str(),
+            &h.start.to_string(),
+            &h.end.to_string(),
+            &name,
+            &h.query_length.to_string(),
             h.strand.as_str(),
         ])?;
     }

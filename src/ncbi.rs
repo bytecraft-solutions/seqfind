@@ -13,13 +13,18 @@ const EFETCH_URL: &str = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.f
 
 /// Download a FASTA record for `accession` from NCBI Nucleotide and write it
 /// to `out_path`. Returns the number of bytes written.
-pub fn fetch_fasta(accession: &str, out_path: &Path) -> Result<u64> {
+pub fn fetch_fasta(accession: &str, out_path: &Path, timeout: Duration) -> Result<u64> {
     if accession.trim().is_empty() {
         bail!("accession is empty");
     }
+    if timeout.is_zero() {
+        bail!("fetch timeout must be greater than zero seconds");
+    }
 
     let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(60))
+        .timeout_connect(Duration::from_secs(30))
+        .timeout_read(timeout)
+        .timeout_write(Duration::from_secs(30))
         .user_agent("seqfind/0.1 (+https://github.com/binyuga/seqfind)")
         .build();
 
