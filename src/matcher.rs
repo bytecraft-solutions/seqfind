@@ -1,4 +1,5 @@
 use bio::pattern_matching::horspool::Horspool;
+use bio::pattern_matching::myers::long::Myers;
 use serde::Serialize;
 
 /// One sequence-search hit.
@@ -13,6 +14,8 @@ pub struct Hit {
     pub strand: String,
     pub matched: String,
     pub pattern: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edits: Option<usize>,
 }
 
 fn complement(base: char) -> char {
@@ -60,6 +63,7 @@ fn find_in_strand(record: &str, sequence: &str, pattern: &str, strand: &str) -> 
                     strand: strand.to_string(),
                     matched: window.to_string(),
                     pattern: pattern.to_string(),
+                    edits: None,
                 });
             }
         }
@@ -73,11 +77,46 @@ fn find_in_strand(record: &str, sequence: &str, pattern: &str, strand: &str) -> 
                 strand: strand.to_string(),
                 matched: sequence[i..i + pat_len].to_string(),
                 pattern: pattern.to_string(),
+                edits: None,
             });
         }
     }
 
     hits
+}
+
+fn find_in_strand_with_max_edits(
+    record: &str,
+    sequence: &str,
+    pattern: &str,
+    strand: &str,
+    max_edits: usize,
+) -> Vec<Hit> {
+    if max_edits == 0 {
+        return find_in_strand(record, sequence, pattern, strand);
+    }
+    if pattern.is_empty() || sequence.is_empty() {
+        return Vec::new();
+    }
+
+    let mut matcher = Myers::<u64>::new(pattern.as_bytes());
+    matcher
+        .find_all(sequence.as_bytes(), max_edits)
+        .filter_map(|(start, end, distance)| {
+            if start >= end || end > sequence.len() {
+                return None;
+            }
+            Some(Hit {
+                record: record.to_string(),
+                start,
+                end,
+                strand: strand.to_string(),
+                matched: sequence[start..end].to_string(),
+                pattern: pattern.to_string(),
+                edits: Some(distance),
+            })
+        })
+        .collect()
 }
 
 pub fn find_matches(record: &str, sequence: &str, pattern: &str, include_rc: bool) -> Vec<Hit> {
@@ -101,6 +140,36 @@ pub fn find_matches(record: &str, sequence: &str, pattern: &str, include_rc: boo
     hits
 }
 
+pub fn find_matches_with_max_edits(
+    record: &str,
+    sequence: &str,
+    pattern: &str,
+    include_rc: bool,
+    max_edits: usize,
+) -> Vec<Hit> {
+    if max_edits == 0 {
+        return find_matches(record, sequence, pattern, include_rc);
+    }
+
+    let pattern = pattern.to_uppercase();
+    let mut hits = find_in_strand_with_max_edits(record, sequence, &pattern, "+", max_edits);
+
+    if include_rc {
+        let rc_seq = reverse_complement(sequence);
+        let rc_hits = find_in_strand_with_max_edits(record, &rc_seq, &pattern, "-", max_edits);
+        let seq_len = sequence.len();
+        for mut hit in rc_hits {
+            let hit_len = hit.end - hit.start;
+            let fwd_start = seq_len - hit.start - hit_len;
+            hit.start = fwd_start;
+            hit.end = fwd_start + hit_len;
+            hits.push(hit);
+        }
+    }
+
+    hits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +182,7 @@ mod tests {
         assert_eq!(hits[0].end, 6);
         assert_eq!(hits[0].strand, "+");
         assert_eq!(hits[0].pattern, "ATGCGT");
+        assert_eq!(hits[0].edits, None);
     }
 
     #[test]
@@ -141,5 +211,15 @@ mod tests {
     fn test_no_match() {
         let hits = find_matches("seq1", "AAAAAAAA", "ATGCGT", false);
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn test_approximate_match() {
+        let hits = find_matches_with_max_edits("seq1", "ATGAGTAAC", "ATGCGT", false, 1);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].start, 0);
+        assert_eq!(hits[0].end, 6);
+        assert_eq!(hits[0].matched, "ATGAGT");
+        assert_eq!(hits[0].edits, Some(1));
     }
 }

@@ -28,6 +28,23 @@ pub struct CompareHit {
     pub strand: String,
     pub matched: String,
     pub query_length: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edits: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Variant {
+    pub reference_file: String,
+    pub reference_record: String,
+    pub query_file: String,
+    pub query_record: String,
+    /// 1-based reference coordinate.
+    pub position: usize,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub alt: String,
+    #[serde(rename = "type")]
+    pub variant_type: String,
 }
 
 pub fn compute_stats(record: &FastaRecord) -> RecordStats {
@@ -74,10 +91,14 @@ pub fn print_hits_text(hits: &[Hit]) {
         return;
     }
     for hit in hits {
-        println!(
+        let mut line = format!(
             "{}\tstart={}\tend={}\tstrand={}\tmatched={}\tpattern={}",
             hit.record, hit.start, hit.end, hit.strand, hit.matched, hit.pattern
         );
+        if let Some(edits) = hit.edits {
+            line.push_str(&format!("\tedits={edits}"));
+        }
+        println!("{line}");
     }
 }
 
@@ -90,8 +111,11 @@ fn write_hits_delimited(hits: &[Hit], delimiter: u8) -> Result<()> {
     let mut wtr = csv::WriterBuilder::new()
         .delimiter(delimiter)
         .from_writer(std::io::stdout());
-    wtr.write_record(["record", "start", "end", "strand", "matched", "pattern"])?;
+    wtr.write_record([
+        "record", "start", "end", "strand", "matched", "pattern", "edits",
+    ])?;
     for h in hits {
+        let edits = h.edits.map(|e| e.to_string()).unwrap_or_default();
         wtr.write_record([
             h.record.as_str(),
             &h.start.to_string(),
@@ -99,6 +123,7 @@ fn write_hits_delimited(hits: &[Hit], delimiter: u8) -> Result<()> {
             h.strand.as_str(),
             h.matched.as_str(),
             h.pattern.as_str(),
+            &edits,
         ])?;
     }
     wtr.flush()?;
@@ -120,12 +145,13 @@ pub fn print_hits_bed(hits: &[Hit]) -> Result<()> {
         .has_headers(false)
         .from_writer(std::io::stdout());
     for h in hits {
+        let score = h.edits.map(|e| e.to_string()).unwrap_or_else(|| "0".into());
         wtr.write_record([
             h.record.as_str(),
             &h.start.to_string(),
             &h.end.to_string(),
             h.matched.as_str(),
-            "0",
+            &score,
             h.strand.as_str(),
         ])?;
     }
@@ -141,7 +167,7 @@ pub fn print_compare_text(hits: &[CompareHit]) {
         return;
     }
     for hit in hits {
-        println!(
+        let mut line = format!(
             "{}:{}\tstart={}\tend={}\tstrand={}\tquery_file={}\tquery_record={}\tquery_length={}\tmatched={}",
             hit.reference_file,
             hit.reference_record,
@@ -153,6 +179,10 @@ pub fn print_compare_text(hits: &[CompareHit]) {
             hit.query_length,
             hit.matched
         );
+        if let Some(edits) = hit.edits {
+            line.push_str(&format!("\tedits={edits}"));
+        }
+        println!("{line}");
     }
 }
 
@@ -175,8 +205,10 @@ fn write_compare_delimited(hits: &[CompareHit], delimiter: u8) -> Result<()> {
         "strand",
         "matched",
         "query_length",
+        "edits",
     ])?;
     for h in hits {
+        let edits = h.edits.map(|e| e.to_string()).unwrap_or_default();
         wtr.write_record([
             h.reference_file.as_str(),
             h.reference_record.as_str(),
@@ -187,6 +219,7 @@ fn write_compare_delimited(hits: &[CompareHit], delimiter: u8) -> Result<()> {
             h.strand.as_str(),
             h.matched.as_str(),
             &h.query_length.to_string(),
+            &edits,
         ])?;
     }
     wtr.flush()?;
@@ -210,13 +243,111 @@ pub fn print_compare_bed(hits: &[CompareHit]) -> Result<()> {
         .from_writer(std::io::stdout());
     for h in hits {
         let name = format!("{}:{}", h.query_file, h.query_record);
+        let score = h
+            .edits
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| h.query_length.to_string());
         wtr.write_record([
             h.reference_record.as_str(),
             &h.start.to_string(),
             &h.end.to_string(),
             &name,
-            &h.query_length.to_string(),
+            &score,
             h.strand.as_str(),
+        ])?;
+    }
+    wtr.flush()?;
+    Ok(())
+}
+
+// --- variant output -----------------------------------------------------
+
+pub fn print_variants_text(variants: &[Variant]) {
+    if variants.is_empty() {
+        println!("No variants found.");
+        return;
+    }
+    for v in variants {
+        println!(
+            "{}:{}\tposition={}\tref={}\talt={}\ttype={}\tquery_file={}\tquery_record={}",
+            v.reference_file,
+            v.reference_record,
+            v.position,
+            v.reference,
+            v.alt,
+            v.variant_type,
+            v.query_file,
+            v.query_record
+        );
+    }
+}
+
+pub fn print_variants_json(variants: &[Variant]) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(variants)?);
+    Ok(())
+}
+
+fn write_variants_delimited(variants: &[Variant], delimiter: u8) -> Result<()> {
+    let mut wtr = csv::WriterBuilder::new()
+        .delimiter(delimiter)
+        .from_writer(std::io::stdout());
+    wtr.write_record([
+        "reference_file",
+        "reference_record",
+        "query_file",
+        "query_record",
+        "position",
+        "ref",
+        "alt",
+        "type",
+    ])?;
+    for v in variants {
+        wtr.write_record([
+            v.reference_file.as_str(),
+            v.reference_record.as_str(),
+            v.query_file.as_str(),
+            v.query_record.as_str(),
+            &v.position.to_string(),
+            v.reference.as_str(),
+            v.alt.as_str(),
+            v.variant_type.as_str(),
+        ])?;
+    }
+    wtr.flush()?;
+    Ok(())
+}
+
+pub fn print_variants_csv(variants: &[Variant]) -> Result<()> {
+    write_variants_delimited(variants, b',')
+}
+
+pub fn print_variants_tsv(variants: &[Variant]) -> Result<()> {
+    write_variants_delimited(variants, b'\t')
+}
+
+pub fn print_variants_bed(variants: &[Variant]) -> Result<()> {
+    let mut wtr = csv::WriterBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(false)
+        .from_writer(std::io::stdout());
+    for v in variants {
+        let start = v.position.saturating_sub(1);
+        let end = if v.reference.is_empty() {
+            start
+        } else {
+            start + v.reference.len()
+        };
+        let name = format!(
+            "{}:{}:{}>{}",
+            v.query_file, v.query_record, v.reference, v.alt
+        );
+        wtr.write_record([
+            v.reference_record.as_str(),
+            &start.to_string(),
+            &end.to_string(),
+            &name,
+            "0",
+            "+",
         ])?;
     }
     wtr.flush()?;

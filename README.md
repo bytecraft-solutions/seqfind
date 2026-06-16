@@ -10,12 +10,16 @@ these tested operations.
 - Fetch FASTA records from NCBI Nucleotide with streamed writes for large files.
 - Read FASTA using `noodles-fasta`.
 - Exact sequence search using Rust-Bio's Horspool matcher.
+- Approximate sequence search using Rust-Bio's Myers matcher via
+  `--max-edits`.
 - Wildcard sequence search with `?` as a single-base wildcard.
 - Reverse-complement search and whole-record reverse-complement output.
 - Sequence stats: length, GC%, and base counts.
 - ORF search across frames and strands.
 - Named motif presets such as EcoRI, BamHI, HindIII, TATA, Kozak, and PolyA.
 - Compare one reference FASTA against one or more query FASTA files.
+- Variant-style FASTA comparison using Rust-Bio pairwise alignment via
+  `compare --mode variants`.
 - Output formats: text, JSON, CSV, TSV, and BED where applicable.
 - PostgreSQL run history with `runs list`, `runs show`, and `runs export`.
 - Timing metadata on CLI operations.
@@ -80,6 +84,16 @@ seqfind search \
   --format json
 ```
 
+Search with up to one edit:
+
+```bash
+seqfind search \
+  --file data/sars-cov-2.fna \
+  --pattern ATGCGT \
+  --max-edits 1 \
+  --format json
+```
+
 Find ORFs:
 
 ```bash
@@ -108,9 +122,34 @@ seqfind compare \
   --time
 ```
 
-`compare` currently performs exact containment search: every query FASTA record
-is searched inside every reference FASTA record. Approximate matching and
-variant-style comparison are planned next.
+By default, `compare` performs containment search: every query FASTA record is
+searched inside every reference FASTA record. Use `--max-edits <N>` for mutated
+markers/contigs:
+
+```bash
+seqfind compare \
+  --reference examples/compare_batch/ref.fna \
+  --query examples/compare_batch/ecoli_marker.fna \
+  --max-edits 1 \
+  --format json \
+  --time
+```
+
+For SNP/indel-style record-to-record comparison, use variant mode. Records are
+paired by FASTA ID by default:
+
+```bash
+seqfind compare \
+  --reference examples/demo_ref.fna \
+  --query examples/demo_sample_mut.fna \
+  --mode variants \
+  --format json \
+  --time
+```
+
+If the files have different record names but the same order, add
+`--pair-by-order`. Variant mode uses global pairwise alignment, so use it for
+gene/contig-sized paired records rather than whole chromosomes.
 
 ## PostgreSQL Run History
 
@@ -145,8 +184,6 @@ Current core crates:
 
 Near-term algorithm work:
 
-- Rust-Bio Myers approximate matching for `--max-edits`.
-- Rust-Bio pairwise alignment for SNP/indel-style `compare --mode variants`.
 - Rust-Bio BNDM or Shift-And for short motif/primer matching.
 - Rust-Bio FM-index or suffix-array based repeated search against large references.
 - `noodles-fasta` FAI support for indexed region queries.

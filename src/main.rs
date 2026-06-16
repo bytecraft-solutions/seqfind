@@ -8,12 +8,15 @@ mod orf;
 mod output;
 
 use anyhow::{Result, bail};
+use bio::alignment::AlignmentOperation;
+use bio::alignment::pairwise::Aligner;
 use clap::Parser;
 use serde_json::json;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use cli::{Cli, Command, OrfFormat, RunsAction, SearchFormat, StatsFormat};
+use cli::{Cli, Command, CompareMode, OrfFormat, RunsAction, SearchFormat, StatsFormat};
 
 /// Restore the default SIGPIPE handler so that piping output to `head`, `less`,
 /// etc. terminates the process cleanly instead of panicking inside `println!`.
@@ -154,15 +157,30 @@ fn run_search(
     file: &Path,
     pattern: &str,
     reverse_complement: bool,
+    max_edits: Option<usize>,
     format: SearchFormat,
     save_db: &Option<String>,
     subcommand_label: &str,
 ) -> Result<()> {
+    if max_edits.is_some_and(|edits| edits > 0) && pattern.contains('?') {
+        bail!("--max-edits cannot currently be combined with ? wildcard patterns");
+    }
+
     let records = fasta::read_fasta(file)?;
     let mut all_hits = Vec::new();
     for record in &records {
-        let hits =
-            matcher::find_matches(&record.name, &record.sequence, pattern, reverse_complement);
+        let hits = match max_edits {
+            Some(edits) => matcher::find_matches_with_max_edits(
+                &record.name,
+                &record.sequence,
+                pattern,
+                reverse_complement,
+                edits,
+            ),
+            None => {
+                matcher::find_matches(&record.name, &record.sequence, pattern, reverse_complement)
+            }
+        };
         all_hits.extend(hits);
     }
     match format {
@@ -175,6 +193,7 @@ fn run_search(
     let params = json!({
         "pattern": pattern,
         "reverse_complement": reverse_complement,
+        "max_edits": max_edits,
         "format": format!("{format:?}").to_lowercase(),
     });
     maybe_save_hits(save_db, subcommand_label, file, params, &all_hits)
@@ -184,10 +203,44 @@ fn run_compare(
     reference: &Path,
     query_files: &[PathBuf],
     reverse_complement: bool,
+    max_edits: Option<usize>,
+    mode: CompareMode,
+    pair_by_order: bool,
     format: SearchFormat,
 ) -> Result<()> {
     if query_files.is_empty() {
         bail!("at least one --query FASTA file is required");
+    }
+    match mode {
+        CompareMode::Exact => run_compare_exact(
+            reference,
+            query_files,
+            reverse_complement,
+            max_edits,
+            pair_by_order,
+            format,
+        ),
+        CompareMode::Variants => run_compare_variants(
+            reference,
+            query_files,
+            reverse_complement,
+            max_edits,
+            pair_by_order,
+            format,
+        ),
+    }
+}
+
+fn run_compare_exact(
+    reference: &Path,
+    query_files: &[PathBuf],
+    reverse_complement: bool,
+    max_edits: Option<usize>,
+    pair_by_order: bool,
+    format: SearchFormat,
+) -> Result<()> {
+    if pair_by_order {
+        bail!("--pair-by-order is only supported with --mode variants");
     }
 
     let reference_records = fasta::read_fasta(reference)?;
@@ -208,12 +261,21 @@ fn run_compare(
             }
 
             for reference_record in &reference_records {
-                let hits = matcher::find_matches(
-                    &reference_record.name,
-                    &reference_record.sequence,
-                    &query_record.sequence,
-                    reverse_complement,
-                );
+                let hits = match max_edits {
+                    Some(edits) => matcher::find_matches_with_max_edits(
+                        &reference_record.name,
+                        &reference_record.sequence,
+                        &query_record.sequence,
+                        reverse_complement,
+                        edits,
+                    ),
+                    None => matcher::find_matches(
+                        &reference_record.name,
+                        &reference_record.sequence,
+                        &query_record.sequence,
+                        reverse_complement,
+                    ),
+                };
 
                 for hit in hits {
                     all_hits.push(output::CompareHit {
@@ -226,18 +288,264 @@ fn run_compare(
                         strand: hit.strand,
                         matched: hit.matched,
                         query_length: query_record.sequence.len(),
+                        edits: hit.edits,
                     });
                 }
             }
         }
     }
 
+    print_compare_hits(&all_hits, format)?;
+    Ok(())
+}
+
+fn run_compare_variants(
+    reference: &Path,
+    query_files: &[PathBuf],
+    reverse_complement: bool,
+    max_edits: Option<usize>,
+    pair_by_order: bool,
+    format: SearchFormat,
+) -> Result<()> {
+    if reverse_complement {
+        bail!("--reverse-complement is only supported with exact compare mode");
+    }
+    if max_edits.is_some() {
+        bail!("--max-edits is only supported with exact compare mode");
+    }
+
+    let reference_records = fasta::read_fasta(reference)?;
+    let reference_file = reference.to_string_lossy().into_owned();
+    let reference_by_name: HashMap<&str, &fasta::FastaRecord> = reference_records
+        .iter()
+        .map(|record| (record.name.as_str(), record))
+        .collect();
+    let mut variants = Vec::new();
+
+    for query_file in query_files {
+        let query_records = fasta::read_fasta(query_file)?;
+        let query_file_label = query_file.to_string_lossy().into_owned();
+
+        if pair_by_order {
+            let count = reference_records.len().min(query_records.len());
+            for i in 0..count {
+                variants.extend(compare_record_variants(
+                    &reference_file,
+                    &reference_records[i],
+                    &query_file_label,
+                    &query_records[i],
+                ));
+            }
+            if reference_records.len() > query_records.len() {
+                for record in &reference_records[query_records.len()..] {
+                    eprintln!(
+                        "warning: reference record {} has no paired query record in {}",
+                        record.name,
+                        query_file.display()
+                    );
+                }
+            } else if query_records.len() > reference_records.len() {
+                for record in &query_records[reference_records.len()..] {
+                    eprintln!(
+                        "warning: query record {} in {} has no paired reference record",
+                        record.name,
+                        query_file.display()
+                    );
+                }
+            }
+            continue;
+        }
+
+        let mut seen_references = HashSet::new();
+        for query_record in &query_records {
+            let Some(reference_record) = reference_by_name.get(query_record.name.as_str()) else {
+                eprintln!(
+                    "warning: query record {} in {} has no matching reference record",
+                    query_record.name,
+                    query_file.display()
+                );
+                continue;
+            };
+            seen_references.insert(reference_record.name.as_str());
+            variants.extend(compare_record_variants(
+                &reference_file,
+                reference_record,
+                &query_file_label,
+                query_record,
+            ));
+        }
+
+        for reference_record in &reference_records {
+            if !seen_references.contains(reference_record.name.as_str()) {
+                eprintln!(
+                    "warning: reference record {} has no matching query record in {}",
+                    reference_record.name,
+                    query_file.display()
+                );
+            }
+        }
+    }
+
+    print_variants(&variants, format)?;
+    Ok(())
+}
+
+fn compare_record_variants(
+    reference_file: &str,
+    reference_record: &fasta::FastaRecord,
+    query_file: &str,
+    query_record: &fasta::FastaRecord,
+) -> Vec<output::Variant> {
+    let context = VariantContext {
+        reference_file,
+        reference_record,
+        query_file,
+        query_record,
+    };
+
+    if reference_record.sequence.len() == query_record.sequence.len() {
+        return compare_equal_length_records(context);
+    }
+
+    let score = |a: u8, b: u8| if a == b { 1 } else { -1 };
+    let mut aligner = Aligner::with_capacity(
+        query_record.sequence.len(),
+        reference_record.sequence.len(),
+        -5,
+        -1,
+        &score,
+    );
+    let alignment = aligner.global(
+        query_record.sequence.as_bytes(),
+        reference_record.sequence.as_bytes(),
+    );
+    let query = query_record.sequence.as_bytes();
+    let reference = reference_record.sequence.as_bytes();
+    let mut query_i = alignment.xstart;
+    let mut reference_i = alignment.ystart;
+    let mut variants = Vec::new();
+
+    for op in alignment.operations {
+        match op {
+            AlignmentOperation::Match => {
+                query_i += 1;
+                reference_i += 1;
+            }
+            AlignmentOperation::Subst => {
+                variants.push(make_variant(
+                    context,
+                    reference_i + 1,
+                    byte_to_string(reference[reference_i]),
+                    byte_to_string(query[query_i]),
+                    "snp",
+                ));
+                query_i += 1;
+                reference_i += 1;
+            }
+            AlignmentOperation::Ins => {
+                variants.push(make_variant(
+                    context,
+                    reference_i + 1,
+                    String::new(),
+                    byte_to_string(query[query_i]),
+                    "insertion",
+                ));
+                query_i += 1;
+            }
+            AlignmentOperation::Del => {
+                variants.push(make_variant(
+                    context,
+                    reference_i + 1,
+                    byte_to_string(reference[reference_i]),
+                    String::new(),
+                    "deletion",
+                ));
+                reference_i += 1;
+            }
+            AlignmentOperation::Xclip(len) => {
+                query_i += len;
+            }
+            AlignmentOperation::Yclip(len) => {
+                reference_i += len;
+            }
+        }
+    }
+
+    variants
+}
+
+#[derive(Clone, Copy)]
+struct VariantContext<'a> {
+    reference_file: &'a str,
+    reference_record: &'a fasta::FastaRecord,
+    query_file: &'a str,
+    query_record: &'a fasta::FastaRecord,
+}
+
+fn compare_equal_length_records(context: VariantContext<'_>) -> Vec<output::Variant> {
+    context
+        .reference_record
+        .sequence
+        .bytes()
+        .zip(context.query_record.sequence.bytes())
+        .enumerate()
+        .filter_map(|(i, (reference_base, query_base))| {
+            if reference_base == query_base {
+                return None;
+            }
+            Some(make_variant(
+                context,
+                i + 1,
+                byte_to_string(reference_base),
+                byte_to_string(query_base),
+                "snp",
+            ))
+        })
+        .collect()
+}
+
+fn byte_to_string(base: u8) -> String {
+    char::from(base).to_string()
+}
+
+fn make_variant(
+    context: VariantContext<'_>,
+    position: usize,
+    reference: String,
+    alt: String,
+    variant_type: &str,
+) -> output::Variant {
+    output::Variant {
+        reference_file: context.reference_file.to_string(),
+        reference_record: context.reference_record.name.clone(),
+        query_file: context.query_file.to_string(),
+        query_record: context.query_record.name.clone(),
+        position,
+        reference,
+        alt,
+        variant_type: variant_type.to_string(),
+    }
+}
+
+fn print_compare_hits(hits: &[output::CompareHit], format: SearchFormat) -> Result<()> {
     match format {
-        SearchFormat::Text => output::print_compare_text(&all_hits),
-        SearchFormat::Json => output::print_compare_json(&all_hits)?,
-        SearchFormat::Csv => output::print_compare_csv(&all_hits)?,
-        SearchFormat::Tsv => output::print_compare_tsv(&all_hits)?,
-        SearchFormat::Bed => output::print_compare_bed(&all_hits)?,
+        SearchFormat::Text => output::print_compare_text(hits),
+        SearchFormat::Json => output::print_compare_json(hits)?,
+        SearchFormat::Csv => output::print_compare_csv(hits)?,
+        SearchFormat::Tsv => output::print_compare_tsv(hits)?,
+        SearchFormat::Bed => output::print_compare_bed(hits)?,
+    }
+
+    Ok(())
+}
+
+fn print_variants(variants: &[output::Variant], format: SearchFormat) -> Result<()> {
+    match format {
+        SearchFormat::Text => output::print_variants_text(variants),
+        SearchFormat::Json => output::print_variants_json(variants)?,
+        SearchFormat::Csv => output::print_variants_csv(variants)?,
+        SearchFormat::Tsv => output::print_variants_tsv(variants)?,
+        SearchFormat::Bed => output::print_variants_bed(variants)?,
     }
 
     Ok(())
@@ -280,12 +588,14 @@ fn run_command(command: Command) -> Result<()> {
             file,
             pattern,
             reverse_complement,
+            max_edits,
             format,
             save_db,
         } => run_search(
             &file,
             &pattern,
             reverse_complement,
+            max_edits,
             format,
             &save_db,
             "search",
@@ -405,6 +715,7 @@ fn run_command(command: Command) -> Result<()> {
                 &file,
                 preset.pattern,
                 reverse_complement,
+                None,
                 format,
                 &save_db,
                 "motif",
@@ -415,8 +726,19 @@ fn run_command(command: Command) -> Result<()> {
             reference,
             query,
             reverse_complement,
+            max_edits,
+            mode,
+            pair_by_order,
             format,
-        } => run_compare(&reference, &query, reverse_complement, format)?,
+        } => run_compare(
+            &reference,
+            &query,
+            reverse_complement,
+            max_edits,
+            mode,
+            pair_by_order,
+            format,
+        )?,
 
         Command::Fetch {
             accession,

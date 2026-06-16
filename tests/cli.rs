@@ -119,7 +119,7 @@ fn search_csv_format_has_header_and_rows() {
         .assert()
         .success()
         .stdout(predicate::str::starts_with(
-            "record,start,end,strand,matched,pattern\n",
+            "record,start,end,strand,matched,pattern,edits\n",
         ))
         .stdout(predicate::str::contains("chr1,0,6,+,ATGCGT,ATGCGT"))
         .stdout(predicate::str::contains("chr2,20,26,+,ATGCGT,ATGCGT"));
@@ -135,9 +135,40 @@ fn search_tsv_format_has_header_and_rows() {
         .assert()
         .success()
         .stdout(predicate::str::starts_with(
-            "record\tstart\tend\tstrand\tmatched\tpattern\n",
+            "record\tstart\tend\tstrand\tmatched\tpattern\tedits\n",
         ))
         .stdout(predicate::str::contains("chr1\t0\t6\t+\tATGCGT\tATGCGT"));
+}
+
+#[test]
+fn search_max_edits_json_reports_edit_distance() {
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(f, ">seq1\nATGAGTAAC").unwrap();
+
+    let out = bin()
+        .args(["search", "--file"])
+        .arg(f.path())
+        .args([
+            "--pattern",
+            "ATGCGT",
+            "--max-edits",
+            "1",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let v: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["start"], 0);
+    assert_eq!(arr[0]["end"], 6);
+    assert_eq!(arr[0]["matched"], "ATGAGT");
+    assert_eq!(arr[0]["edits"], 1);
 }
 
 #[test]
@@ -476,6 +507,101 @@ fn compare_bed_uses_reference_coordinates() {
         .success()
         .stdout(predicate::str::contains("ref1\t3\t9\t"))
         .stdout(predicate::str::contains(":marker_a\t6\t+"));
+}
+
+#[test]
+fn compare_max_edits_finds_mutated_query_marker() {
+    let mut reference = NamedTempFile::new().unwrap();
+    writeln!(reference, ">ref1\nAAATGAGTCCC").unwrap();
+
+    let mut query = NamedTempFile::new().unwrap();
+    writeln!(query, ">marker_a\nATGCGT").unwrap();
+
+    let out = bin()
+        .args(["compare", "--reference"])
+        .arg(reference.path())
+        .args(["--query"])
+        .arg(query.path())
+        .args(["--max-edits", "1", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let v: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["reference_record"], "ref1");
+    assert_eq!(arr[0]["query_record"], "marker_a");
+    assert_eq!(arr[0]["start"], 2);
+    assert_eq!(arr[0]["end"], 8);
+    assert_eq!(arr[0]["edits"], 1);
+}
+
+#[test]
+fn compare_variants_pairs_by_record_id() {
+    let mut reference = NamedTempFile::new().unwrap();
+    writeln!(
+        reference,
+        ">demo_gene\nATGCGTAACTGATGCGTTTTATGAAATAACCCACGCAT"
+    )
+    .unwrap();
+
+    let mut query = NamedTempFile::new().unwrap();
+    writeln!(query, ">demo_gene\nATGCGTAACTGATGCGTTTTATGAGATAACCCACGCAT").unwrap();
+
+    let out = bin()
+        .args(["compare", "--reference"])
+        .arg(reference.path())
+        .args(["--query"])
+        .arg(query.path())
+        .args(["--mode", "variants", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let v: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["reference_record"], "demo_gene");
+    assert_eq!(arr[0]["query_record"], "demo_gene");
+    assert_eq!(arr[0]["position"], 25);
+    assert_eq!(arr[0]["ref"], "A");
+    assert_eq!(arr[0]["alt"], "G");
+    assert_eq!(arr[0]["type"], "snp");
+}
+
+#[test]
+fn compare_variants_can_pair_by_order_with_different_names() {
+    let mut reference = NamedTempFile::new().unwrap();
+    writeln!(reference, ">ref_name\nATGCGT").unwrap();
+
+    let mut query = NamedTempFile::new().unwrap();
+    writeln!(query, ">query_name\nATGAGT").unwrap();
+
+    let out = bin()
+        .args(["compare", "--reference"])
+        .arg(reference.path())
+        .args(["--query"])
+        .arg(query.path())
+        .args(["--mode", "variants", "--pair-by-order", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let v: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["reference_record"], "ref_name");
+    assert_eq!(arr[0]["query_record"], "query_name");
+    assert_eq!(arr[0]["position"], 4);
+    assert_eq!(arr[0]["ref"], "C");
+    assert_eq!(arr[0]["alt"], "A");
 }
 
 #[test]

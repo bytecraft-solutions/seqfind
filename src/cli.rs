@@ -22,6 +22,15 @@ pub enum SearchFormat {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CompareMode {
+    /// Search query FASTA records as subsequences inside reference records.
+    Exact,
+
+    /// Compare paired records and emit SNP/indel-style variants.
+    Variants,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum StatsFormat {
     Text,
     Json,
@@ -64,6 +73,10 @@ pub enum Command {
         /// Also search the reverse complement strand
         #[arg(long)]
         reverse_complement: bool,
+
+        /// Allow up to N substitutions/insertions/deletions using Rust-Bio Myers
+        #[arg(long)]
+        max_edits: Option<usize>,
 
         /// Output format
         #[arg(long, value_enum, default_value_t = SearchFormat::Text)]
@@ -162,6 +175,18 @@ pub enum Command {
         /// Also search the reverse complement strand
         #[arg(long)]
         reverse_complement: bool,
+
+        /// Allow up to N substitutions/insertions/deletions for containment search
+        #[arg(long)]
+        max_edits: Option<usize>,
+
+        /// Compare mode: exact containment search or paired variant calling
+        #[arg(long, value_enum, default_value_t = CompareMode::Exact)]
+        mode: CompareMode,
+
+        /// In variant mode, pair records by file order instead of FASTA record ID
+        #[arg(long)]
+        pair_by_order: bool,
 
         /// Output format
         #[arg(long, value_enum, default_value_t = SearchFormat::Text)]

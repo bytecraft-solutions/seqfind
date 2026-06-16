@@ -261,6 +261,7 @@ impl Database {
                 strand: row.get(3),
                 matched: row.get(4),
                 pattern: row.get(5),
+                edits: None,
             })
             .collect())
     }
