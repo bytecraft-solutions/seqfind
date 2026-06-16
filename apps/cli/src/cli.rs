@@ -225,7 +225,7 @@ pub enum RunsAction {
     /// List recent runs
     List {
         /// PostgreSQL connection URL (default: $SEQFIND_DB_URL)
-        #[arg(long, env = crate::db::URL_ENV)]
+        #[arg(long, env = seqfind_core::db::URL_ENV)]
         db: String,
 
         /// Max number of rows to show
@@ -236,7 +236,7 @@ pub enum RunsAction {
     /// Show metadata and result counts for one run
     Show {
         /// PostgreSQL connection URL (default: $SEQFIND_DB_URL)
-        #[arg(long, env = crate::db::URL_ENV)]
+        #[arg(long, env = seqfind_core::db::URL_ENV)]
         db: String,
 
         /// Run id
@@ -246,7 +246,7 @@ pub enum RunsAction {
     /// Re-emit a run's results in any supported format
     Export {
         /// PostgreSQL connection URL (default: $SEQFIND_DB_URL)
-        #[arg(long, env = crate::db::URL_ENV)]
+        #[arg(long, env = seqfind_core::db::URL_ENV)]
         db: String,
 
         /// Run id

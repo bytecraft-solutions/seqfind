@@ -13,14 +13,23 @@ pub struct FastaRecord {
 
 pub fn read_fasta(path: &Path) -> Result<Vec<FastaRecord>> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let mut reader = fasta::io::Reader::new(BufReader::new(file));
+    read_fasta_reader(BufReader::new(file), &path.display().to_string())
+}
 
+/// Parse FASTA from an in-memory string. Used by the HTTP API which receives
+/// FASTA payloads in request bodies rather than from the filesystem.
+pub fn read_fasta_str(input: &str) -> Result<Vec<FastaRecord>> {
+    read_fasta_reader(BufReader::new(input.as_bytes()), "<input>")
+}
+
+fn read_fasta_reader<R: std::io::BufRead>(reader: R, source: &str) -> Result<Vec<FastaRecord>> {
+    let mut reader = fasta::io::Reader::new(reader);
     let mut records = Vec::new();
     for result in reader.records() {
-        let record = result.with_context(|| format!("while reading {}", path.display()))?;
+        let record = result.with_context(|| format!("while reading {source}"))?;
 
         let name = String::from_utf8(record.name().to_vec())
-            .with_context(|| format!("invalid FASTA record name in {}", path.display()))?;
+            .with_context(|| format!("invalid FASTA record name in {source}"))?;
 
         let sequence: String = record
             .sequence()

@@ -3,3 +3,7 @@
 
 docs
 examples
+
+node_modules/
+apps/web/dist/
+.turbo/

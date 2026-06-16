@@ -1,13 +1,7 @@
-mod alphabets;
 mod cli;
-mod db;
-mod fasta;
-mod index;
-mod matcher;
-mod motif;
-mod ncbi;
-mod orf;
-mod output;
+
+#[allow(unused_imports)]
+use seqfind_core::{alphabets, db, fasta, index, matcher, motif, ncbi, orf, output};
 
 use anyhow::{Result, bail};
 use bio::alignment::AlignmentOperation;
