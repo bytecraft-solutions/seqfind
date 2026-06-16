@@ -1,0 +1,6 @@
+>chr1 Homo sapiens chromosome 1 fragment
+ATGCGTAACTGATGCGTTTTATGAAATAACCCACGCAT
+>chr2 short test sequence
+TTTATGAAATAACCCACGCATGCGT
+>chr3 reverse complement target
+ACGCATGGGTTTATTTCATAAA
