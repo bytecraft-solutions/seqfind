@@ -1,3 +1,4 @@
+use bio::pattern_matching::horspool::Horspool;
 use serde::Serialize;
 
 /// One sequence-search hit.
@@ -42,28 +43,35 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
 fn find_in_strand(record: &str, sequence: &str, pattern: &str, strand: &str) -> Vec<Hit> {
     let pat_len = pattern.len();
     let seq_len = sequence.len();
-    let is_wildcard = pattern.contains('?');
     let mut hits = Vec::new();
 
     if pat_len > seq_len {
         return hits;
     }
 
-    for i in 0..=(seq_len - pat_len) {
-        let window = &sequence[i..i + pat_len];
-        let matched = if is_wildcard {
-            wildcard_match(pattern, window)
-        } else {
-            window == pattern
-        };
-
-        if matched {
+    if pattern.contains('?') {
+        for i in 0..=(seq_len - pat_len) {
+            let window = &sequence[i..i + pat_len];
+            if wildcard_match(pattern, window) {
+                hits.push(Hit {
+                    record: record.to_string(),
+                    start: i,
+                    end: i + pat_len,
+                    strand: strand.to_string(),
+                    matched: window.to_string(),
+                    pattern: pattern.to_string(),
+                });
+            }
+        }
+    } else {
+        let matcher = Horspool::new(pattern.as_bytes());
+        for i in matcher.find_all(sequence.as_bytes()) {
             hits.push(Hit {
                 record: record.to_string(),
                 start: i,
                 end: i + pat_len,
                 strand: strand.to_string(),
-                matched: window.to_string(),
+                matched: sequence[i..i + pat_len].to_string(),
                 pattern: pattern.to_string(),
             });
         }

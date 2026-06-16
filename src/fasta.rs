@@ -1,13 +1,8 @@
 use anyhow::{Context, Result};
-use seq_io::fasta::{Reader, Record};
+use noodles_fasta as fasta;
+use std::fs::File;
+use std::io::BufReader;
 use std::path::Path;
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum FastaError {
-    #[error("invalid FASTA record: {0}")]
-    Parse(String),
-}
 
 #[derive(Debug, Clone)]
 pub struct FastaRecord {
@@ -16,28 +11,24 @@ pub struct FastaRecord {
 }
 
 pub fn read_fasta(path: &Path) -> Result<Vec<FastaRecord>> {
-    let mut reader =
-        Reader::from_path(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut reader = fasta::io::Reader::new(BufReader::new(file));
 
     let mut records = Vec::new();
-    while let Some(result) = reader.next() {
-        let rec = result
-            .map_err(|e| FastaError::Parse(e.to_string()))
-            .with_context(|| format!("while reading {}", path.display()))?;
+    for result in reader.records() {
+        let record = result.with_context(|| format!("while reading {}", path.display()))?;
 
-        let id = rec
-            .id()
-            .map_err(|e| FastaError::Parse(e.to_string()))?
-            .to_string();
+        let name = String::from_utf8(record.name().to_vec())
+            .with_context(|| format!("invalid FASTA record name in {}", path.display()))?;
 
-        let mut sequence = String::with_capacity(rec.seq().len());
-        for line in rec.seq_lines() {
-            for &b in line {
-                sequence.push(b.to_ascii_uppercase() as char);
-            }
-        }
+        let sequence = record
+            .sequence()
+            .as_ref()
+            .iter()
+            .map(|b| b.to_ascii_uppercase() as char)
+            .collect();
 
-        records.push(FastaRecord { name: id, sequence });
+        records.push(FastaRecord { name, sequence });
     }
 
     Ok(records)
