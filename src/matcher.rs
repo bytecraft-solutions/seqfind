@@ -1,11 +1,17 @@
 use serde::Serialize;
 
+/// One sequence-search hit.
+///
+/// Coordinates are forward-strand, 0-based, half-open: `start` is the index of
+/// the first matching base on the forward strand, `end = start + matched.len()`.
 #[derive(Debug, Clone, Serialize)]
 pub struct Hit {
     pub record: String,
-    pub position: usize,
+    pub start: usize,
+    pub end: usize,
     pub strand: String,
     pub matched: String,
+    pub pattern: String,
 }
 
 fn complement(base: char) -> char {
@@ -54,9 +60,11 @@ fn find_in_strand(record: &str, sequence: &str, pattern: &str, strand: &str) -> 
         if matched {
             hits.push(Hit {
                 record: record.to_string(),
-                position: i,
+                start: i,
+                end: i + pat_len,
                 strand: strand.to_string(),
                 matched: window.to_string(),
+                pattern: pattern.to_string(),
             });
         }
     }
@@ -71,11 +79,13 @@ pub fn find_matches(record: &str, sequence: &str, pattern: &str, include_rc: boo
     if include_rc {
         let rc_seq = reverse_complement(sequence);
         let rc_hits = find_in_strand(record, &rc_seq, &pattern, "-");
-        // convert positions back to forward-strand coordinates
+        // Mirror RC indices back onto forward-strand coordinates.
         let seq_len = sequence.len();
         let pat_len = pattern.len();
         for mut hit in rc_hits {
-            hit.position = seq_len - hit.position - pat_len;
+            let fwd_start = seq_len - hit.start - pat_len;
+            hit.start = fwd_start;
+            hit.end = fwd_start + pat_len;
             hits.push(hit);
         }
     }
@@ -91,8 +101,10 @@ mod tests {
     fn test_exact_match() {
         let hits = find_matches("seq1", "ATGCGTAAC", "ATGCGT", false);
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].position, 0);
+        assert_eq!(hits[0].start, 0);
+        assert_eq!(hits[0].end, 6);
         assert_eq!(hits[0].strand, "+");
+        assert_eq!(hits[0].pattern, "ATGCGT");
     }
 
     #[test]

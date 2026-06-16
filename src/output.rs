@@ -3,6 +3,7 @@ use serde::Serialize;
 
 use crate::fasta::FastaRecord;
 use crate::matcher::Hit;
+use crate::orf::Orf;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RecordStats {
@@ -61,8 +62,8 @@ pub fn print_hits_text(hits: &[Hit]) {
     }
     for hit in hits {
         println!(
-            "{}\tpos={}\tstrand={}\tmatched={}",
-            hit.record, hit.position, hit.strand, hit.matched
+            "{}\tstart={}\tend={}\tstrand={}\tmatched={}\tpattern={}",
+            hit.record, hit.start, hit.end, hit.strand, hit.matched, hit.pattern
         );
     }
 }
@@ -76,13 +77,15 @@ fn write_hits_delimited(hits: &[Hit], delimiter: u8) -> Result<()> {
     let mut wtr = csv::WriterBuilder::new()
         .delimiter(delimiter)
         .from_writer(std::io::stdout());
-    wtr.write_record(["record", "position", "strand", "matched"])?;
+    wtr.write_record(["record", "start", "end", "strand", "matched", "pattern"])?;
     for h in hits {
         wtr.write_record([
             h.record.as_str(),
-            &h.position.to_string(),
+            &h.start.to_string(),
+            &h.end.to_string(),
             h.strand.as_str(),
             h.matched.as_str(),
+            h.pattern.as_str(),
         ])?;
     }
     wtr.flush()?;
@@ -104,11 +107,10 @@ pub fn print_hits_bed(hits: &[Hit]) -> Result<()> {
         .has_headers(false)
         .from_writer(std::io::stdout());
     for h in hits {
-        let end = h.position + h.matched.len();
         wtr.write_record([
             h.record.as_str(),
-            &h.position.to_string(),
-            &end.to_string(),
+            &h.start.to_string(),
+            &h.end.to_string(),
             h.matched.as_str(),
             "0",
             h.strand.as_str(),
@@ -161,4 +163,150 @@ pub fn print_stats_csv(stats: &[RecordStats]) -> Result<()> {
 
 pub fn print_stats_tsv(stats: &[RecordStats]) -> Result<()> {
     write_stats_delimited(stats, b'\t')
+}
+
+// --- ORF output --------------------------------------------------------
+
+pub fn print_orfs_text(orfs: &[Orf]) {
+    if orfs.is_empty() {
+        println!("No ORFs found.");
+        return;
+    }
+    for o in orfs {
+        println!(
+            "{}\tstart={}\tend={}\tlength={}\tstrand={}\tstart_codon={}\tstop_codon={}",
+            o.record, o.start, o.end, o.length, o.strand, o.start_codon, o.stop_codon,
+        );
+    }
+}
+
+pub fn print_orfs_json(orfs: &[Orf]) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(orfs)?);
+    Ok(())
+}
+
+fn write_orfs_delimited(orfs: &[Orf], delimiter: u8) -> Result<()> {
+    let mut wtr = csv::WriterBuilder::new()
+        .delimiter(delimiter)
+        .from_writer(std::io::stdout());
+    wtr.write_record([
+        "record",
+        "start",
+        "end",
+        "length",
+        "strand",
+        "start_codon",
+        "stop_codon",
+    ])?;
+    for o in orfs {
+        wtr.write_record([
+            o.record.as_str(),
+            &o.start.to_string(),
+            &o.end.to_string(),
+            &o.length.to_string(),
+            o.strand.as_str(),
+            o.start_codon.as_str(),
+            o.stop_codon.as_str(),
+        ])?;
+    }
+    wtr.flush()?;
+    Ok(())
+}
+
+pub fn print_orfs_csv(orfs: &[Orf]) -> Result<()> {
+    write_orfs_delimited(orfs, b',')
+}
+
+pub fn print_orfs_tsv(orfs: &[Orf]) -> Result<()> {
+    write_orfs_delimited(orfs, b'\t')
+}
+
+pub fn print_orfs_bed(orfs: &[Orf]) -> Result<()> {
+    let mut wtr = csv::WriterBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(false)
+        .from_writer(std::io::stdout());
+    for o in orfs {
+        let name = format!("ORF_{}_{}", o.start_codon, o.stop_codon);
+        wtr.write_record([
+            o.record.as_str(),
+            &o.start.to_string(),
+            &o.end.to_string(),
+            &name,
+            &o.length.to_string(),
+            o.strand.as_str(),
+        ])?;
+    }
+    wtr.flush()?;
+    Ok(())
+}
+
+// --- FASTA output (rc --file) ------------------------------------------
+
+/// Write a FASTA record to stdout with sequence lines wrapped at `width` bp.
+pub fn print_fasta_record(name: &str, sequence: &str, width: usize) {
+    println!(">{name}");
+    if width == 0 {
+        println!("{sequence}");
+        return;
+    }
+    let bytes = sequence.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let end = (i + width).min(bytes.len());
+        // SAFETY: input is ASCII (we uppercase on read).
+        println!("{}", std::str::from_utf8(&bytes[i..end]).unwrap());
+        i = end;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fasta::FastaRecord;
+
+    fn rec(name: &str, sequence: &str) -> FastaRecord {
+        FastaRecord {
+            name: name.to_string(),
+            sequence: sequence.to_string(),
+        }
+    }
+
+    #[test]
+    fn gc_percent_basic() {
+        // 4 G/C out of 8 = 50%
+        let s = compute_stats(&rec("seq1", "ATGCATGC"));
+        assert_eq!(s.length, 8);
+        assert_eq!(s.g, 2);
+        assert_eq!(s.c, 2);
+        assert!((s.gc_percent - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gc_percent_all_at() {
+        let s = compute_stats(&rec("seq2", "AAAATTTT"));
+        assert_eq!(s.gc_percent, 0.0);
+    }
+
+    #[test]
+    fn gc_percent_all_gc() {
+        let s = compute_stats(&rec("seq3", "GGGCCC"));
+        assert!((s.gc_percent - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gc_percent_empty_sequence() {
+        let s = compute_stats(&rec("seq4", ""));
+        assert_eq!(s.length, 0);
+        assert_eq!(s.gc_percent, 0.0);
+    }
+
+    #[test]
+    fn gc_percent_counts_n_separately() {
+        // 1 G out of 4 known bases, but length is 4, so GC% = 25%.
+        let s = compute_stats(&rec("seq5", "ANGN"));
+        assert_eq!(s.n, 2);
+        assert_eq!(s.length, 4);
+        assert!((s.gc_percent - 25.0).abs() < 1e-9);
+    }
 }
