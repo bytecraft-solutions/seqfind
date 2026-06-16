@@ -11,6 +11,7 @@ use anyhow::{Result, bail};
 use clap::Parser;
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cli::{Cli, Command, OrfFormat, RunsAction, SearchFormat, StatsFormat};
 
@@ -50,6 +51,105 @@ fn maybe_save_hits(
     Ok(())
 }
 
+struct CliTimer {
+    label: &'static str,
+    started: Instant,
+}
+
+impl CliTimer {
+    fn start(label: &'static str) -> Self {
+        let started = Instant::now();
+        let started_at = SystemTime::now();
+        eprintln!("{label} started: {}", format_system_time(started_at));
+        Self { label, started }
+    }
+
+    fn finish(&self, success: bool) {
+        let ended_at = SystemTime::now();
+        let status = if success { "ok" } else { "failed" };
+        eprintln!(
+            "{label} ended:   {}",
+            format_system_time(ended_at),
+            label = self.label
+        );
+        eprintln!(
+            "{label} took:    {} ({status})",
+            format_duration(self.started.elapsed()),
+            label = self.label
+        );
+    }
+}
+
+fn format_system_time(time: SystemTime) -> String {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => format_unix_timestamp(duration.as_secs()),
+        Err(err) => format!(
+            "{} before 1970-01-01 00:00:00 UTC",
+            format_duration(err.duration())
+        ),
+    }
+}
+
+fn format_unix_timestamp(seconds: u64) -> String {
+    let days = (seconds / 86_400) as i64;
+    let seconds_of_day = seconds % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC")
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if month <= 2 { 1 } else { 0 };
+
+    (year as i32, month as u32, day as u32)
+}
+
+fn format_duration(duration: Duration) -> String {
+    let total_seconds = duration.as_secs();
+    let subsecond_millis = duration.subsec_millis();
+
+    if total_seconds == 0 {
+        let nanos = duration.subsec_nanos();
+        if nanos < 1_000 {
+            return format!("{nanos} ns");
+        }
+        if nanos < 1_000_000 {
+            return format!("{:.3} us", nanos as f64 / 1_000.0);
+        }
+        return format!("{:.3} ms", nanos as f64 / 1_000_000.0);
+    }
+
+    if total_seconds < 60 {
+        return format!(
+            "{:.3} s",
+            total_seconds as f64 + subsecond_millis as f64 / 1_000.0
+        );
+    }
+
+    let hours = total_seconds / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+    let seconds_with_fraction = seconds as f64 + subsecond_millis as f64 / 1_000.0;
+
+    if hours == 0 {
+        format!("{minutes}m {seconds_with_fraction:06.3}s")
+    } else {
+        format!("{hours}h {minutes:02}m {seconds_with_fraction:06.3}s")
+    }
+}
+
 fn run_search(
     file: &Path,
     pattern: &str,
@@ -80,11 +180,38 @@ fn run_search(
     maybe_save_hits(save_db, subcommand_label, file, params, &all_hits)
 }
 
+fn command_label(command: &Command) -> &'static str {
+    match command {
+        Command::Search { .. } => "search",
+        Command::Stats { .. } => "stats",
+        Command::Rc { .. } => "rc",
+        Command::Orf { .. } => "orf",
+        Command::Motif { .. } => "motif",
+        Command::Fetch { .. } => "fetch",
+        Command::Runs {
+            action: RunsAction::List { .. },
+        } => "runs list",
+        Command::Runs {
+            action: RunsAction::Show { .. },
+        } => "runs show",
+        Command::Runs {
+            action: RunsAction::Export { .. },
+        } => "runs export",
+    }
+}
+
 fn main() -> Result<()> {
     reset_sigpipe();
     let cli = Cli::parse();
+    let Cli { command, time: _ } = cli;
+    let timer = CliTimer::start(command_label(&command));
+    let result = run_command(command);
+    timer.finish(result.is_ok());
+    result
+}
 
-    match cli.command {
+fn run_command(command: Command) -> Result<()> {
+    match command {
         Command::Search {
             file,
             pattern,

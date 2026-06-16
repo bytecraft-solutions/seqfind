@@ -4,6 +4,10 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(name = "seqfind", about = "Sequence search and analysis CLI")]
 pub struct Cli {
+    /// Print timing information. Timing is currently always printed for CLI operations.
+    #[arg(long, global = true)]
+    pub time: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }

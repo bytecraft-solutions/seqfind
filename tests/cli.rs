@@ -70,6 +70,23 @@ fn search_text_format() {
 }
 
 #[test]
+fn search_reports_timing_to_stderr() {
+    let f = fixture();
+    bin()
+        .args(["search", "--file"])
+        .arg(f.path())
+        .args(["--pattern", "ATGCGT"])
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("search started:")
+                .and(predicate::str::contains("search ended:"))
+                .and(predicate::str::contains("search took:"))
+                .and(predicate::str::contains("(ok)")),
+        );
+}
+
+#[test]
 fn search_json_format() {
     let f = fixture();
     let out = bin()
@@ -168,6 +185,19 @@ fn stats_text_format() {
         .success()
         .stdout(predicate::str::contains("chr1\tlength=33"))
         .stdout(predicate::str::contains("chr2\tlength=29"));
+}
+
+#[test]
+fn stats_accepts_time_flag_after_subcommand() {
+    let f = fixture();
+    bin()
+        .args(["stats", "--file"])
+        .arg(f.path())
+        .arg("--time")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("chr1\tlength=33"))
+        .stderr(predicate::str::contains("stats took:"));
 }
 
 #[test]

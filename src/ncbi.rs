@@ -1,8 +1,11 @@
-//! Thin NCBI Efetch client. One blocking GET, no streaming or caching yet -
-//! reference genomes are small enough that simple wins.
+//! Thin NCBI Efetch client.
+//!
+//! Streams FASTA responses directly to disk so large records, such as human
+//! chromosomes, do not need to fit in memory.
 
 use anyhow::{Context, Result, bail};
-use std::fs;
+use std::fs::{self, File};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -34,13 +37,25 @@ pub fn fetch_fasta(accession: &str, out_path: &Path) -> Result<u64> {
         bail!("NCBI returned HTTP {status} for {accession}");
     }
 
-    let body = resp
-        .into_string()
-        .with_context(|| format!("failed to read NCBI response body for {accession}"))?;
+    let mut reader = resp.into_reader();
 
-    if !body.starts_with('>') {
+    let mut first = [0_u8; 1];
+    let n = reader
+        .read(&mut first)
+        .with_context(|| format!("failed to read first byte from NCBI response for {accession}"))?;
+
+    if n == 0 {
+        bail!("NCBI returned an empty response for {accession}");
+    }
+
+    if first[0] != b'>' {
         // Efetch returns a plain-text error message with no FASTA header on bad IDs.
-        let preview: String = body.chars().take(160).collect();
+        let mut preview_bytes = vec![first[0]];
+        let mut limited = reader.take(159);
+        limited
+            .read_to_end(&mut preview_bytes)
+            .with_context(|| format!("failed to read NCBI error preview for {accession}"))?;
+        let preview = String::from_utf8_lossy(&preview_bytes);
         bail!("NCBI did not return a FASTA record for {accession}: {preview}");
     }
 
@@ -50,8 +65,18 @@ pub fn fetch_fasta(accession: &str, out_path: &Path) -> Result<u64> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    fs::write(out_path, &body)
-        .with_context(|| format!("failed to write {}", out_path.display()))?;
+    let file = File::create(out_path)
+        .with_context(|| format!("failed to create {}", out_path.display()))?;
+    let mut writer = BufWriter::new(file);
 
-    Ok(body.len() as u64)
+    writer
+        .write_all(&first)
+        .with_context(|| format!("failed to write {}", out_path.display()))?;
+    let copied = io::copy(&mut reader, &mut writer)
+        .with_context(|| format!("failed to stream NCBI response body for {accession}"))?;
+    writer
+        .flush()
+        .with_context(|| format!("failed to flush {}", out_path.display()))?;
+
+    Ok(copied + 1)
 }
