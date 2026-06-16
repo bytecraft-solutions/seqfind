@@ -12,7 +12,9 @@ seqfind-core = { path = "../../crates/seqfind-core" }
 anyhow = { workspace = true }
 bio = { workspace = true }
 clap = { workspace = true }
+csv = { workspace = true }
 libc = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]

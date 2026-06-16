@@ -5,7 +5,7 @@ use utoipa::{OpenApi, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
 use utoipa_scalar::{Scalar, Servable};
 
-use seqfind_core::{fasta, matcher};
+use seqfind_core::{matcher, seq};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -30,15 +30,13 @@ async fn main() -> anyhow::Result<()> {
         .routes(routes!(search))
         .split_for_parts();
 
-    let app = router
-        .merge(Scalar::with_url("/docs", api.clone()))
-        .route(
-            "/openapi.json",
-            axum::routing::get(move || {
-                let api = api.clone();
-                async move { Json(api) }
-            }),
-        );
+    let app = router.merge(Scalar::with_url("/docs", api.clone())).route(
+        "/openapi.json",
+        axum::routing::get(move || {
+            let api = api.clone();
+            async move { Json(api) }
+        }),
+    );
 
     let addr: SocketAddr = "0.0.0.0:8080".parse()?;
     tracing::info!("seqfind-api listening on http://{addr}  (docs: /docs)");
@@ -123,7 +121,7 @@ async fn search(Json(req): Json<SearchRequest>) -> Result<Json<SearchResponse>, 
     }
 
     let records =
-        fasta::read_fasta_str(&req.fasta).map_err(|e| ApiErrorResponse::bad_request(e.to_string()))?;
+        seq::read_seqs_str(&req.fasta).map_err(|e| ApiErrorResponse::bad_request(e.to_string()))?;
 
     let mut hits = Vec::new();
     for r in &records {

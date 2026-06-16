@@ -1,9 +1,9 @@
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::fasta::FastaRecord;
 use crate::matcher::Hit;
 use crate::orf::Orf;
+use crate::seq::SeqRecord;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RecordStats {
@@ -47,7 +47,7 @@ pub struct Variant {
     pub variant_type: String,
 }
 
-pub fn compute_stats(record: &FastaRecord) -> RecordStats {
+pub fn compute_stats(record: &SeqRecord) -> RecordStats {
     let mut a = 0usize;
     let mut t = 0usize;
     let mut g = 0usize;
@@ -497,12 +497,13 @@ pub fn print_fasta_record(name: &str, sequence: &str, width: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fasta::FastaRecord;
+    use crate::seq::SeqRecord;
 
-    fn rec(name: &str, sequence: &str) -> FastaRecord {
-        FastaRecord {
+    fn rec(name: &str, sequence: &str) -> SeqRecord {
+        SeqRecord {
             name: name.to_string(),
             sequence: sequence.to_string(),
+            quality: None,
         }
     }
 

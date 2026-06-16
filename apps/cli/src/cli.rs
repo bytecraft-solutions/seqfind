@@ -38,6 +38,48 @@ pub enum StatsFormat {
     Tsv,
 }
 
+/// Output formats for record-emitting subcommands (`seq`, `convert`, `sample`,
+/// `head`, `rmdup`, `sort`, `shuffle`, `split`, `subseq`).
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum RecordFormat {
+    /// Detect from input format and `--out` extension; falls back to FASTA.
+    Auto,
+    Fasta,
+    Fastq,
+    /// Tab-separated (id, sequence, optional quality).
+    Tab,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SortKeyArg {
+    Id,
+    Length,
+    Sequence,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum RmdupKeyArg {
+    Id,
+    Sequence,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum LocateFormat {
+    Text,
+    Json,
+    Csv,
+    Tsv,
+    Bed,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum DigestFormat {
+    Text,
+    Json,
+    Csv,
+    Tsv,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum OrfFormat {
     Text,
@@ -88,11 +130,16 @@ pub enum Command {
         save_db: Option<String>,
     },
 
-    /// Print sequence statistics for a FASTA file
+    /// Print sequence statistics for a FASTA/FASTQ file
     Stats {
-        /// Path to FASTA file
+        /// Path to FASTA/FASTQ file (use `-` for stdin)
         #[arg(short, long)]
         file: PathBuf,
+
+        /// Print a SeqKit-style aggregate summary (N50, sum/min/avg/max, GC%,
+        /// plus Q20/Q30 for FASTQ) instead of per-record rows.
+        #[arg(long)]
+        summary: bool,
 
         /// Output format
         #[arg(long, value_enum, default_value_t = StatsFormat::Text)]
@@ -217,6 +264,273 @@ pub enum Command {
     Runs {
         #[command(subcommand)]
         action: RunsAction,
+    },
+
+    /// Apply SeqKit-style per-record transforms (case, RNA↔DNA, length filters, RC, gap removal)
+    Seq {
+        /// Path to FASTA/FASTQ file (use `-` for stdin)
+        #[arg(short, long)]
+        file: PathBuf,
+        /// Output path (omit or use `-` for stdout)
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        upper: bool,
+        #[arg(long)]
+        lower: bool,
+        /// Remove `-` and `.` from sequences (alignment gaps).
+        #[arg(long)]
+        remove_gaps: bool,
+        /// Replace T with U (DNA → RNA).
+        #[arg(long)]
+        rna: bool,
+        /// Replace U with T (RNA → DNA).
+        #[arg(long)]
+        dna: bool,
+        #[arg(long)]
+        reverse: bool,
+        #[arg(long)]
+        complement: bool,
+        /// Reverse + complement.
+        #[arg(long)]
+        reverse_complement: bool,
+        /// Drop records shorter than N bases.
+        #[arg(long)]
+        min_length: Option<usize>,
+        /// Drop records longer than N bases.
+        #[arg(long)]
+        max_length: Option<usize>,
+        /// Print only the record IDs.
+        #[arg(long, conflicts_with_all = ["only_seq", "only_name"])]
+        only_id: bool,
+        /// Print only the FASTA names (id + description).
+        #[arg(long, conflicts_with_all = ["only_seq", "only_id"])]
+        only_name: bool,
+        /// Print only the sequences.
+        #[arg(long, conflicts_with_all = ["only_id", "only_name"])]
+        only_seq: bool,
+        /// FASTA line wrap width (0 = no wrap). Ignored for FASTQ output.
+        #[arg(long, default_value_t = 70)]
+        wrap: usize,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = RecordFormat::Auto)]
+        format: RecordFormat,
+    },
+
+    /// Convert between formats: FASTQ→FASTA, fx2tab, tab2fx.
+    Convert {
+        #[command(subcommand)]
+        action: ConvertAction,
+    },
+
+    /// Take the first N records (SeqKit's `head`).
+    Head {
+        #[arg(short, long)]
+        file: PathBuf,
+        #[arg(short, long, default_value_t = 10)]
+        number: usize,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = RecordFormat::Auto)]
+        format: RecordFormat,
+    },
+
+    /// Take a 1-based inclusive record range (SeqKit's `range`).
+    Range {
+        #[arg(short, long)]
+        file: PathBuf,
+        /// `START:END` (1-based inclusive). Negative values count from the end.
+        #[arg(short, long)]
+        range: String,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = RecordFormat::Auto)]
+        format: RecordFormat,
+    },
+
+    /// Sample N records uniformly without replacement, with a deterministic seed.
+    Sample {
+        #[arg(short, long)]
+        file: PathBuf,
+        /// Number of records to sample (mutually exclusive with --proportion).
+        #[arg(short, long, conflicts_with = "proportion")]
+        number: Option<usize>,
+        /// Sampling proportion 0.0..=1.0.
+        #[arg(short, long, conflicts_with = "number")]
+        proportion: Option<f64>,
+        /// PRNG seed (default 11).
+        #[arg(short, long, default_value_t = 11)]
+        seed: u64,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = RecordFormat::Auto)]
+        format: RecordFormat,
+    },
+
+    /// Shuffle records with a deterministic seed (SeqKit's `shuffle`).
+    Shuffle {
+        #[arg(short, long)]
+        file: PathBuf,
+        #[arg(short, long, default_value_t = 23)]
+        seed: u64,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = RecordFormat::Auto)]
+        format: RecordFormat,
+    },
+
+    /// Drop duplicate records by ID or sequence (SeqKit's `rmdup`).
+    Rmdup {
+        #[arg(short, long)]
+        file: PathBuf,
+        #[arg(long, value_enum, default_value_t = RmdupKeyArg::Id)]
+        by: RmdupKeyArg,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = RecordFormat::Auto)]
+        format: RecordFormat,
+    },
+
+    /// Sort records by id, length, or sequence (SeqKit's `sort`).
+    Sort {
+        #[arg(short, long)]
+        file: PathBuf,
+        #[arg(long, value_enum, default_value_t = SortKeyArg::Id)]
+        by: SortKeyArg,
+        #[arg(long)]
+        reverse: bool,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = RecordFormat::Auto)]
+        format: RecordFormat,
+    },
+
+    /// Split records into N parts or chunks of size K (SeqKit's `split`).
+    Split {
+        #[arg(short, long)]
+        file: PathBuf,
+        /// Split into this many parts (mutually exclusive with --size).
+        #[arg(long, conflicts_with = "size")]
+        parts: Option<usize>,
+        /// Split into chunks of this many records.
+        #[arg(long, conflicts_with = "parts")]
+        size: Option<usize>,
+        /// Directory to write chunks into.
+        #[arg(short = 'O', long, default_value = ".")]
+        out_dir: PathBuf,
+        /// Filename prefix for the chunks (default: input stem).
+        #[arg(long)]
+        prefix: Option<String>,
+        #[arg(long, value_enum, default_value_t = RecordFormat::Auto)]
+        format: RecordFormat,
+    },
+
+    /// Locate motifs/regex/IUPAC patterns inside records (SeqKit's `locate`).
+    Locate {
+        #[arg(short, long)]
+        file: PathBuf,
+        /// One or more patterns. Use `--regex` to disable IUPAC translation.
+        #[arg(short, long, num_args = 1..)]
+        pattern: Vec<String>,
+        /// Path to a file with one pattern per line (use with or instead of --pattern).
+        #[arg(long)]
+        pattern_file: Option<PathBuf>,
+        /// Treat patterns as raw regex instead of IUPAC ambiguity codes.
+        #[arg(long)]
+        regex: bool,
+        /// Also locate on the reverse-complement strand.
+        #[arg(long)]
+        reverse_complement: bool,
+        #[arg(long, value_enum, default_value_t = LocateFormat::Text)]
+        format: LocateFormat,
+    },
+
+    /// Extract a 1-based inclusive region from each record (SeqKit's `subseq --region`).
+    Subseq {
+        #[arg(short, long)]
+        file: PathBuf,
+        /// `START:END` (1-based inclusive). Negatives count from the end.
+        #[arg(short, long)]
+        region: String,
+        /// Bases of upstream context to include.
+        #[arg(long, default_value_t = 0)]
+        up_stream: usize,
+        /// Bases of downstream context to include.
+        #[arg(long, default_value_t = 0)]
+        down_stream: usize,
+        /// Take the region from the reverse-complement strand.
+        #[arg(long)]
+        reverse_complement: bool,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = RecordFormat::Auto)]
+        format: RecordFormat,
+    },
+
+    /// Print per-record SHA-256 digests (case-insensitive) -SeqKit's `sum`.
+    Sum {
+        #[arg(short, long)]
+        file: PathBuf,
+        #[arg(long, value_enum, default_value_t = DigestFormat::Text)]
+        format: DigestFormat,
+    },
+
+    /// Regex-replace record IDs or sequences (SeqKit's `replace`).
+    Replace {
+        #[arg(short, long)]
+        file: PathBuf,
+        /// Regex pattern to match.
+        #[arg(short, long)]
+        pattern: String,
+        /// Replacement string. Supports `$1`-style backreferences.
+        #[arg(short, long)]
+        replacement: String,
+        /// Operate on sequences instead of IDs.
+        #[arg(long)]
+        by_seq: bool,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = RecordFormat::Auto)]
+        format: RecordFormat,
+    },
+
+    /// Disambiguate duplicate record IDs by appending `_2`, `_3`, … (SeqKit's `rename`).
+    Rename {
+        #[arg(short, long)]
+        file: PathBuf,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = RecordFormat::Auto)]
+        format: RecordFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConvertAction {
+    /// FASTQ → FASTA (drop quality).
+    Fq2fa {
+        #[arg(short, long)]
+        file: PathBuf,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long, default_value_t = 70)]
+        wrap: usize,
+    },
+    /// Records → TSV (`id\tsequence[\tquality]`).
+    Fx2tab {
+        #[arg(short, long)]
+        file: PathBuf,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
+    /// TSV → records (inverse of `fx2tab`).
+    Tab2fx {
+        #[arg(short, long)]
+        file: PathBuf,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = RecordFormat::Auto)]
+        format: RecordFormat,
     },
 }
 

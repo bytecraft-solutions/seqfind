@@ -1,7 +1,10 @@
 mod cli;
 
 #[allow(unused_imports)]
-use seqfind_core::{alphabets, db, fasta, index, matcher, motif, ncbi, orf, output};
+use seqfind_core::{
+    alphabets, convert as core_convert, db, digest, edit as core_edit, index, locate, matcher,
+    motif, ncbi, orf, output, select, seq, subseq as core_subseq, summary, transform,
+};
 
 use anyhow::{Result, bail};
 use bio::alignment::AlignmentOperation;
@@ -9,10 +12,14 @@ use bio::alignment::pairwise::Aligner;
 use clap::Parser;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use cli::{Cli, Command, CompareMode, OrfFormat, RunsAction, SearchFormat, StatsFormat};
+use cli::{
+    Cli, Command, CompareMode, ConvertAction, DigestFormat, LocateFormat, OrfFormat, RecordFormat,
+    RmdupKeyArg, RunsAction, SearchFormat, SortKeyArg, StatsFormat,
+};
 
 /// Restore the default SIGPIPE handler so that piping output to `head`, `less`,
 /// etc. terminates the process cleanly instead of panicking inside `println!`.
@@ -162,7 +169,7 @@ fn run_search(
         bail!("--max-edits cannot currently be combined with ? wildcard patterns");
     }
 
-    let records = fasta::read_fasta(file)?;
+    let records = seq::read_seqs(file)?;
     let mut all_hits = Vec::new();
     for record in &records {
         let hits = match max_edits {
@@ -291,7 +298,7 @@ fn run_compare_exact(
         bail!("--fm-index is exact-only; remove --max-edits or drop --fm-index");
     }
 
-    let reference_records = fasta::read_fasta(reference)?;
+    let reference_records = seq::read_seqs(reference)?;
     let reference_file = reference.to_string_lossy().into_owned();
 
     let indexes: Vec<index::ReferenceIndex> = if fm_index {
@@ -306,7 +313,7 @@ fn run_compare_exact(
     let mut all_hits = Vec::new();
 
     for query_file in query_files {
-        let query_records = fasta::read_fasta(query_file)?;
+        let query_records = seq::read_seqs(query_file)?;
         let query_file_label = query_file.to_string_lossy().into_owned();
 
         for query_record in &query_records {
@@ -380,16 +387,16 @@ fn run_compare_variants(
         bail!("--max-edits is only supported with exact compare mode");
     }
 
-    let reference_records = fasta::read_fasta(reference)?;
+    let reference_records = seq::read_seqs(reference)?;
     let reference_file = reference.to_string_lossy().into_owned();
-    let reference_by_name: HashMap<&str, &fasta::FastaRecord> = reference_records
+    let reference_by_name: HashMap<&str, &seq::SeqRecord> = reference_records
         .iter()
         .map(|record| (record.name.as_str(), record))
         .collect();
     let mut variants = Vec::new();
 
     for query_file in query_files {
-        let query_records = fasta::read_fasta(query_file)?;
+        let query_records = seq::read_seqs(query_file)?;
         let query_file_label = query_file.to_string_lossy().into_owned();
 
         if pair_by_order {
@@ -458,9 +465,9 @@ fn run_compare_variants(
 
 fn compare_record_variants(
     reference_file: &str,
-    reference_record: &fasta::FastaRecord,
+    reference_record: &seq::SeqRecord,
     query_file: &str,
-    query_record: &fasta::FastaRecord,
+    query_record: &seq::SeqRecord,
 ) -> Vec<output::Variant> {
     let context = VariantContext {
         reference_file,
@@ -543,9 +550,9 @@ fn compare_record_variants(
 #[derive(Clone, Copy)]
 struct VariantContext<'a> {
     reference_file: &'a str,
-    reference_record: &'a fasta::FastaRecord,
+    reference_record: &'a seq::SeqRecord,
     query_file: &'a str,
-    query_record: &'a fasta::FastaRecord,
+    query_record: &'a seq::SeqRecord,
 }
 
 fn compare_equal_length_records(context: VariantContext<'_>) -> Vec<output::Variant> {
@@ -635,6 +642,20 @@ fn command_label(command: &Command) -> &'static str {
         Command::Runs {
             action: RunsAction::Export { .. },
         } => "runs export",
+        Command::Seq { .. } => "seq",
+        Command::Convert { .. } => "convert",
+        Command::Head { .. } => "head",
+        Command::Range { .. } => "range",
+        Command::Sample { .. } => "sample",
+        Command::Shuffle { .. } => "shuffle",
+        Command::Rmdup { .. } => "rmdup",
+        Command::Sort { .. } => "sort",
+        Command::Split { .. } => "split",
+        Command::Locate { .. } => "locate",
+        Command::Subseq { .. } => "subseq",
+        Command::Sum { .. } => "sum",
+        Command::Replace { .. } => "replace",
+        Command::Rename { .. } => "rename",
     }
 }
 
@@ -669,17 +690,23 @@ fn run_command(command: Command) -> Result<()> {
 
         Command::Stats {
             file,
+            summary: want_summary,
             format,
             save_db,
         } => {
-            let records = fasta::read_fasta(&file)?;
+            let records = seq::read_seqs(&file)?;
             let stats: Vec<_> = records.iter().map(output::compute_stats).collect();
 
-            match format {
-                StatsFormat::Text => output::print_stats_text(&stats),
-                StatsFormat::Json => output::print_stats_json(&stats)?,
-                StatsFormat::Csv => output::print_stats_csv(&stats)?,
-                StatsFormat::Tsv => output::print_stats_tsv(&stats)?,
+            if want_summary {
+                let agg = summary::compute(&records);
+                print_summary(&agg, format)?;
+            } else {
+                match format {
+                    StatsFormat::Text => output::print_stats_text(&stats),
+                    StatsFormat::Json => output::print_stats_json(&stats)?,
+                    StatsFormat::Csv => output::print_stats_csv(&stats)?,
+                    StatsFormat::Tsv => output::print_stats_tsv(&stats)?,
+                }
             }
 
             if let Some(override_url) = &save_db {
@@ -701,7 +728,7 @@ fn run_command(command: Command) -> Result<()> {
                 println!("{}", matcher::reverse_complement(&seq.to_uppercase()));
             }
             (None, Some(path)) => {
-                let records = fasta::read_fasta(&path)?;
+                let records = seq::read_seqs(&path)?;
                 for r in &records {
                     let rc = matcher::reverse_complement(&r.sequence);
                     let name = format!("{}_rc", r.name);
@@ -718,7 +745,7 @@ fn run_command(command: Command) -> Result<()> {
             format,
             save_db,
         } => {
-            let records = fasta::read_fasta(&file)?;
+            let records = seq::read_seqs(&file)?;
             let mut all_orfs = Vec::new();
             for r in &records {
                 let orfs = orf::find_orfs(&r.name, &r.sequence, min_length, !forward_only);
@@ -903,7 +930,473 @@ fn run_command(command: Command) -> Result<()> {
                 }
             }
         },
+
+        Command::Seq {
+            file,
+            out,
+            upper,
+            lower,
+            remove_gaps,
+            rna,
+            dna,
+            reverse,
+            complement,
+            reverse_complement,
+            min_length,
+            max_length,
+            only_id,
+            only_name,
+            only_seq,
+            wrap,
+            format,
+        } => {
+            let records = seq::read_seqs(&file)?;
+            let opts = transform::TransformOptions {
+                uppercase: upper,
+                lowercase: lower,
+                remove_gaps,
+                dna_to_rna: rna,
+                rna_to_dna: dna,
+                reverse,
+                complement,
+                reverse_complement,
+                min_length,
+                max_length,
+            };
+            let mut writer = seq::open_output(out.as_deref())?;
+            let any_quality = records.iter().any(|r| r.quality.is_some());
+            let wfmt = resolve_record_format(format, any_quality, out.as_deref());
+            for r in &records {
+                let Some(t) = transform::apply(r, &opts) else {
+                    continue;
+                };
+                if only_id || only_name {
+                    writeln!(writer, "{}", t.name)?;
+                } else if only_seq {
+                    writeln!(writer, "{}", t.sequence)?;
+                } else {
+                    match wfmt {
+                        seq::WriteFormat::Fasta => {
+                            seq::write_fasta_record(&mut writer, &t.name, &t.sequence, wrap)?
+                        }
+                        seq::WriteFormat::Fastq => seq::write_fastq_record(&mut writer, &t)?,
+                    }
+                }
+            }
+            writer.flush()?;
+        }
+
+        Command::Convert { action } => match action {
+            ConvertAction::Fq2fa { file, out, wrap } => {
+                let records = seq::read_seqs(&file)?;
+                let mut writer = seq::open_output(out.as_deref())?;
+                for r in core_convert::fq2fa(&records) {
+                    seq::write_fasta_record(&mut writer, &r.name, &r.sequence, wrap)?;
+                }
+                writer.flush()?;
+            }
+            ConvertAction::Fx2tab { file, out } => {
+                let records = seq::read_seqs(&file)?;
+                let mut writer = seq::open_output(out.as_deref())?;
+                core_convert::fx2tab(&mut writer, &records)?;
+                writer.flush()?;
+            }
+            ConvertAction::Tab2fx { file, out, format } => {
+                let reader = std::io::BufReader::new(std::fs::File::open(&file)?);
+                let records = core_convert::tab2fx(reader)?;
+                let any_quality = records.iter().any(|r| r.quality.is_some());
+                let wfmt = resolve_record_format(format, any_quality, out.as_deref());
+                let mut writer = seq::open_output(out.as_deref())?;
+                seq::write_records(&mut writer, &records, wfmt, 70)?;
+                writer.flush()?;
+            }
+        },
+
+        Command::Head {
+            file,
+            number,
+            out,
+            format,
+        } => {
+            let records = seq::read_seqs(&file)?;
+            let picked = select::head(&records, number);
+            emit_records(&picked, out.as_deref(), format)?;
+        }
+
+        Command::Range {
+            file,
+            range,
+            out,
+            format,
+        } => {
+            let (a, b) = range
+                .split_once(':')
+                .ok_or_else(|| anyhow::anyhow!("--range must be START:END, got '{range}'"))?;
+            let start: usize = a.parse()?;
+            let end: usize = b.parse()?;
+            let records = seq::read_seqs(&file)?;
+            let picked = select::range(&records, start, end)?;
+            emit_records(&picked, out.as_deref(), format)?;
+        }
+
+        Command::Sample {
+            file,
+            number,
+            proportion,
+            seed,
+            out,
+            format,
+        } => {
+            let records = seq::read_seqs(&file)?;
+            let kind = match (number, proportion) {
+                (Some(n), None) => select::SampleKind::Number(n),
+                (None, Some(p)) => {
+                    if !(0.0..=1.0).contains(&p) {
+                        bail!("--proportion must be between 0.0 and 1.0");
+                    }
+                    select::SampleKind::Proportion(p)
+                }
+                (None, None) => bail!("pass --number or --proportion"),
+                (Some(_), Some(_)) => unreachable!("clap conflicts_with"),
+            };
+            let picked = select::sample(&records, kind, seed);
+            emit_records(&picked, out.as_deref(), format)?;
+        }
+
+        Command::Shuffle {
+            file,
+            seed,
+            out,
+            format,
+        } => {
+            let records = seq::read_seqs(&file)?;
+            let picked = select::shuffle(&records, seed);
+            emit_records(&picked, out.as_deref(), format)?;
+        }
+
+        Command::Rmdup {
+            file,
+            by,
+            out,
+            format,
+        } => {
+            let records = seq::read_seqs(&file)?;
+            let key = match by {
+                RmdupKeyArg::Id => select::RmdupKey::Id,
+                RmdupKeyArg::Sequence => select::RmdupKey::Sequence,
+            };
+            let (kept, dropped) = select::rmdup(&records, key);
+            eprintln!("rmdup: kept {}, dropped {}", kept.len(), dropped);
+            emit_records(&kept, out.as_deref(), format)?;
+        }
+
+        Command::Sort {
+            file,
+            by,
+            reverse,
+            out,
+            format,
+        } => {
+            let records = seq::read_seqs(&file)?;
+            let key = match by {
+                SortKeyArg::Id => select::SortKey::Id,
+                SortKeyArg::Length => select::SortKey::Length,
+                SortKeyArg::Sequence => select::SortKey::Sequence,
+            };
+            let sorted = select::sort(&records, key, reverse);
+            emit_records(&sorted, out.as_deref(), format)?;
+        }
+
+        Command::Split {
+            file,
+            parts,
+            size,
+            out_dir,
+            prefix,
+            format,
+        } => {
+            let records = seq::read_seqs(&file)?;
+            let chunks = match (parts, size) {
+                (Some(n), None) => select::split_into_parts(&records, n),
+                (None, Some(s)) => select::split_by_size(&records, s),
+                (None, None) => bail!("pass --parts or --size"),
+                (Some(_), Some(_)) => unreachable!("clap conflicts_with"),
+            };
+            std::fs::create_dir_all(&out_dir)?;
+            let stem = prefix.unwrap_or_else(|| {
+                file.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("part")
+                    .to_string()
+            });
+            let any_quality = records.iter().any(|r| r.quality.is_some());
+            let wfmt = resolve_record_format(format, any_quality, None);
+            let ext = match wfmt {
+                seq::WriteFormat::Fasta => "fasta",
+                seq::WriteFormat::Fastq => "fastq",
+            };
+            for (i, chunk) in chunks.iter().enumerate() {
+                let path = out_dir.join(format!("{stem}.part_{:03}.{ext}", i + 1));
+                let mut w = seq::open_output(Some(&path))?;
+                seq::write_records(&mut w, chunk, wfmt, 70)?;
+                w.flush()?;
+                eprintln!("wrote {} records → {}", chunk.len(), path.display());
+            }
+        }
+
+        Command::Locate {
+            file,
+            pattern,
+            pattern_file,
+            regex,
+            reverse_complement,
+            format,
+        } => {
+            let mut raw_patterns: Vec<(String, String)> = pattern
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (format!("p{}", i + 1), p.clone()))
+                .collect();
+            if let Some(pf) = pattern_file {
+                let text = std::fs::read_to_string(&pf)?;
+                for (i, line) in text.lines().enumerate() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    raw_patterns.push((format!("file_p{}", i + 1), line.to_string()));
+                }
+            }
+            if raw_patterns.is_empty() {
+                bail!("provide --pattern <P> and/or --pattern-file <FILE>");
+            }
+            let patterns: Vec<locate::LocatePattern> = raw_patterns
+                .into_iter()
+                .map(|(name, raw)| {
+                    if regex {
+                        locate::LocatePattern::new(name, raw)
+                    } else {
+                        locate::LocatePattern::from_iupac(name, raw)
+                    }
+                })
+                .collect::<Result<_>>()?;
+            let records = seq::read_seqs(&file)?;
+            let mut hits = Vec::new();
+            for r in &records {
+                hits.extend(locate::locate_in_record(r, &patterns, reverse_complement));
+            }
+            print_locate_hits(&hits, format)?;
+        }
+
+        Command::Subseq {
+            file,
+            region,
+            up_stream,
+            down_stream,
+            reverse_complement,
+            out,
+            format,
+        } => {
+            let region = core_subseq::Region::parse(&region)?;
+            let opts = core_subseq::SubseqOptions {
+                region,
+                reverse_complement,
+                up_stream,
+                down_stream,
+            };
+            let records = seq::read_seqs(&file)?;
+            let mut extracted = Vec::with_capacity(records.len());
+            for r in &records {
+                if let Some(out_rec) = core_subseq::subseq_record(r, &opts)? {
+                    extracted.push(out_rec);
+                }
+            }
+            emit_records(&extracted, out.as_deref(), format)?;
+        }
+
+        Command::Sum { file, format } => {
+            let records = seq::read_seqs(&file)?;
+            let digests = digest::digest_records(&records);
+            print_digests(&digests, format)?;
+        }
+
+        Command::Replace {
+            file,
+            pattern,
+            replacement,
+            by_seq,
+            out,
+            format,
+        } => {
+            let records = seq::read_seqs(&file)?;
+            let edited = if by_seq {
+                core_edit::replace_seq(&records, &pattern, &replacement)?
+            } else {
+                core_edit::replace_id(&records, &pattern, &replacement)?
+            };
+            emit_records(&edited, out.as_deref(), format)?;
+        }
+
+        Command::Rename { file, out, format } => {
+            let records = seq::read_seqs(&file)?;
+            let (renamed, n) = core_edit::rename_duplicates(&records);
+            eprintln!("rename: {n} record(s) renamed");
+            emit_records(&renamed, out.as_deref(), format)?;
+        }
     }
 
+    Ok(())
+}
+
+/// Pick FASTA vs FASTQ output based on:
+/// 1. an explicit `--format` flag (Fasta/Fastq), 2. the destination extension
+///    if `--out` was given, 3. whether the input carries quality data.
+fn resolve_record_format(
+    flag: RecordFormat,
+    input_has_quality: bool,
+    out: Option<&Path>,
+) -> seq::WriteFormat {
+    match flag {
+        RecordFormat::Fasta | RecordFormat::Tab => seq::WriteFormat::Fasta,
+        RecordFormat::Fastq => seq::WriteFormat::Fastq,
+        RecordFormat::Auto => {
+            if let Some(p) = out
+                && let Some(ext) = p.extension().and_then(|s| s.to_str())
+            {
+                let ext = ext.to_ascii_lowercase();
+                if matches!(ext.as_str(), "fq" | "fastq") {
+                    return seq::WriteFormat::Fastq;
+                }
+                if matches!(ext.as_str(), "fa" | "fna" | "fasta") {
+                    return seq::WriteFormat::Fasta;
+                }
+            }
+            if input_has_quality {
+                seq::WriteFormat::Fastq
+            } else {
+                seq::WriteFormat::Fasta
+            }
+        }
+    }
+}
+
+fn emit_records(
+    records: &[seq::SeqRecord],
+    out: Option<&Path>,
+    format: RecordFormat,
+) -> Result<()> {
+    let any_quality = records.iter().any(|r| r.quality.is_some());
+    let wfmt = resolve_record_format(format, any_quality, out);
+    let mut w = seq::open_output(out)?;
+    if matches!(format, RecordFormat::Tab) {
+        core_convert::fx2tab(&mut w, records)?;
+    } else {
+        seq::write_records(&mut w, records, wfmt, 70)?;
+    }
+    w.flush()?;
+    Ok(())
+}
+
+fn print_summary(s: &summary::StatsSummary, format: StatsFormat) -> Result<()> {
+    match format {
+        StatsFormat::Text => {
+            println!("num_seqs:    {}", s.num_seqs);
+            println!("sum_len:     {}", s.sum_len);
+            println!("min_len:     {}", s.min_len);
+            println!("avg_len:     {:.2}", s.avg_len);
+            println!("max_len:     {}", s.max_len);
+            println!("N50:         {}", s.n50);
+            println!("GC%:         {:.2}", s.gc_percent);
+            println!("N_count:     {}", s.n_count);
+            if let Some(q20) = s.q20_percent {
+                println!("Q20%:        {:.2}", q20);
+            }
+            if let Some(q30) = s.q30_percent {
+                println!("Q30%:        {:.2}", q30);
+            }
+        }
+        StatsFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(s)?);
+        }
+        StatsFormat::Csv => {
+            let mut w = csv::Writer::from_writer(std::io::stdout());
+            w.serialize(s)?;
+            w.flush()?;
+        }
+        StatsFormat::Tsv => {
+            let mut w = csv::WriterBuilder::new()
+                .delimiter(b'\t')
+                .from_writer(std::io::stdout());
+            w.serialize(s)?;
+            w.flush()?;
+        }
+    }
+    Ok(())
+}
+
+fn print_locate_hits(hits: &[locate::LocateHit], format: LocateFormat) -> Result<()> {
+    match format {
+        LocateFormat::Text => {
+            for h in hits {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    h.record, h.start, h.end, h.strand, h.pattern_name, h.pattern, h.matched
+                );
+            }
+        }
+        LocateFormat::Json => println!("{}", serde_json::to_string_pretty(hits)?),
+        LocateFormat::Csv => {
+            let mut w = csv::Writer::from_writer(std::io::stdout());
+            for h in hits {
+                w.serialize(h)?;
+            }
+            w.flush()?;
+        }
+        LocateFormat::Tsv => {
+            let mut w = csv::WriterBuilder::new()
+                .delimiter(b'\t')
+                .from_writer(std::io::stdout());
+            for h in hits {
+                w.serialize(h)?;
+            }
+            w.flush()?;
+        }
+        LocateFormat::Bed => {
+            for h in hits {
+                println!(
+                    "{}\t{}\t{}\t{}\t.\t{}",
+                    h.record, h.start, h.end, h.pattern_name, h.strand
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_digests(rows: &[digest::RecordDigest], format: DigestFormat) -> Result<()> {
+    match format {
+        DigestFormat::Text => {
+            for r in rows {
+                println!("{}\t{}\t{}", r.sha256, r.length, r.record);
+            }
+        }
+        DigestFormat::Json => println!("{}", serde_json::to_string_pretty(rows)?),
+        DigestFormat::Csv => {
+            let mut w = csv::Writer::from_writer(std::io::stdout());
+            for r in rows {
+                w.serialize(r)?;
+            }
+            w.flush()?;
+        }
+        DigestFormat::Tsv => {
+            let mut w = csv::WriterBuilder::new()
+                .delimiter(b'\t')
+                .from_writer(std::io::stdout());
+            for r in rows {
+                w.serialize(r)?;
+            }
+            w.flush()?;
+        }
+    }
     Ok(())
 }

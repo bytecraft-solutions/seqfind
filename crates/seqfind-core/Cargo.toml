@@ -11,6 +11,11 @@ serde_json = { workspace = true }
 csv = { workspace = true }
 bio = { workspace = true }
 noodles-fasta = { workspace = true }
+flate2 = { workspace = true }
+regex = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+sha2 = { workspace = true }
 ureq = { workspace = true }
 libc = { workspace = true }
 postgres = { workspace = true }
