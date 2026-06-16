@@ -184,6 +184,11 @@ pub enum Command {
         #[arg(long, value_enum, default_value_t = CompareMode::Exact)]
         mode: CompareMode,
 
+        /// Build an FM-index per reference record (exact mode only). Pays off
+        /// when many queries are searched against a chromosome-scale reference.
+        #[arg(long)]
+        fm_index: bool,
+
         /// In variant mode, pair records by file order instead of FASTA record ID
         #[arg(long)]
         pair_by_order: bool,

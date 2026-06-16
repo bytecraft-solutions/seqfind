@@ -1,6 +1,8 @@
+mod alphabets;
 mod cli;
 mod db;
 mod fasta;
+mod index;
 mod matcher;
 mod motif;
 mod ncbi;
@@ -199,6 +201,46 @@ fn run_search(
     maybe_save_hits(save_db, subcommand_label, file, params, &all_hits)
 }
 
+fn fm_index_hits(
+    reference: &index::ReferenceIndex,
+    query: &str,
+    include_rc: bool,
+) -> Vec<matcher::Hit> {
+    let pat_len = query.len();
+    let mut hits = Vec::new();
+    for start in reference.find_forward(query) {
+        let end = start + pat_len;
+        hits.push(matcher::Hit {
+            record: reference.name.clone(),
+            start,
+            end,
+            strand: "+".to_string(),
+            matched: query.to_string(),
+            pattern: query.to_string(),
+            edits: None,
+        });
+    }
+    if include_rc {
+        // `matched` mirrors the non-FM path: report the (uppercased) pattern,
+        // not the forward-strand substring. The start index already encodes
+        // where the reverse complement sits on the forward strand.
+        for start in reference.find_reverse(query) {
+            let end = start + pat_len;
+            hits.push(matcher::Hit {
+                record: reference.name.clone(),
+                start,
+                end,
+                strand: "-".to_string(),
+                matched: query.to_string(),
+                pattern: query.to_string(),
+                edits: None,
+            });
+        }
+    }
+    hits
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_compare(
     reference: &Path,
     query_files: &[PathBuf],
@@ -206,6 +248,7 @@ fn run_compare(
     max_edits: Option<usize>,
     mode: CompareMode,
     pair_by_order: bool,
+    fm_index: bool,
     format: SearchFormat,
 ) -> Result<()> {
     if query_files.is_empty() {
@@ -218,33 +261,54 @@ fn run_compare(
             reverse_complement,
             max_edits,
             pair_by_order,
+            fm_index,
             format,
         ),
-        CompareMode::Variants => run_compare_variants(
-            reference,
-            query_files,
-            reverse_complement,
-            max_edits,
-            pair_by_order,
-            format,
-        ),
+        CompareMode::Variants => {
+            if fm_index {
+                bail!("--fm-index is only supported with exact compare mode");
+            }
+            run_compare_variants(
+                reference,
+                query_files,
+                reverse_complement,
+                max_edits,
+                pair_by_order,
+                format,
+            )
+        }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_compare_exact(
     reference: &Path,
     query_files: &[PathBuf],
     reverse_complement: bool,
     max_edits: Option<usize>,
     pair_by_order: bool,
+    fm_index: bool,
     format: SearchFormat,
 ) -> Result<()> {
     if pair_by_order {
         bail!("--pair-by-order is only supported with --mode variants");
     }
+    if fm_index && max_edits.is_some_and(|edits| edits > 0) {
+        bail!("--fm-index is exact-only; remove --max-edits or drop --fm-index");
+    }
 
     let reference_records = fasta::read_fasta(reference)?;
     let reference_file = reference.to_string_lossy().into_owned();
+
+    let indexes: Vec<index::ReferenceIndex> = if fm_index {
+        reference_records
+            .iter()
+            .map(|r| index::ReferenceIndex::build(r.name.clone(), &r.sequence))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let mut all_hits = Vec::new();
 
     for query_file in query_files {
@@ -260,21 +324,29 @@ fn run_compare_exact(
                 );
             }
 
-            for reference_record in &reference_records {
-                let hits = match max_edits {
-                    Some(edits) => matcher::find_matches_with_max_edits(
-                        &reference_record.name,
-                        &reference_record.sequence,
+            for (ref_idx, reference_record) in reference_records.iter().enumerate() {
+                let hits = if fm_index {
+                    fm_index_hits(
+                        &indexes[ref_idx],
                         &query_record.sequence,
                         reverse_complement,
-                        edits,
-                    ),
-                    None => matcher::find_matches(
-                        &reference_record.name,
-                        &reference_record.sequence,
-                        &query_record.sequence,
-                        reverse_complement,
-                    ),
+                    )
+                } else {
+                    match max_edits {
+                        Some(edits) => matcher::find_matches_with_max_edits(
+                            &reference_record.name,
+                            &reference_record.sequence,
+                            &query_record.sequence,
+                            reverse_complement,
+                            edits,
+                        ),
+                        None => matcher::find_matches(
+                            &reference_record.name,
+                            &reference_record.sequence,
+                            &query_record.sequence,
+                            reverse_complement,
+                        ),
+                    }
                 };
 
                 for hit in hits {
@@ -729,6 +801,7 @@ fn run_command(command: Command) -> Result<()> {
             max_edits,
             mode,
             pair_by_order,
+            fm_index,
             format,
         } => run_compare(
             &reference,
@@ -737,6 +810,7 @@ fn run_command(command: Command) -> Result<()> {
             max_edits,
             mode,
             pair_by_order,
+            fm_index,
             format,
         )?,
 

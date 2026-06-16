@@ -1,6 +1,13 @@
+use bio::pattern_matching::bndm::BNDM;
 use bio::pattern_matching::horspool::Horspool;
 use bio::pattern_matching::myers::long::Myers;
 use serde::Serialize;
+
+/// Patterns at or below this length are matched with rust-bio's BNDM, which is
+/// significantly faster than Horspool on short DNA primers/motifs. BNDM uses a
+/// 64-bit bitmask internally and panics for longer patterns, so we fall back
+/// to Horspool above this length.
+pub const BNDM_MAX_PATTERN_LEN: usize = 64;
 
 /// One sequence-search hit.
 ///
@@ -68,8 +75,7 @@ fn find_in_strand(record: &str, sequence: &str, pattern: &str, strand: &str) -> 
             }
         }
     } else {
-        let matcher = Horspool::new(pattern.as_bytes());
-        for i in matcher.find_all(sequence.as_bytes()) {
+        for i in exact_match_positions(sequence.as_bytes(), pattern.as_bytes()) {
             hits.push(Hit {
                 record: record.to_string(),
                 start: i,
@@ -83,6 +89,19 @@ fn find_in_strand(record: &str, sequence: &str, pattern: &str, strand: &str) -> 
     }
 
     hits
+}
+
+/// Dispatch exact matching to BNDM for short patterns (≤64) and Horspool
+/// otherwise. Returns 0-based forward-strand start positions.
+pub fn exact_match_positions(text: &[u8], pattern: &[u8]) -> Vec<usize> {
+    if pattern.is_empty() || pattern.len() > text.len() {
+        return Vec::new();
+    }
+    if pattern.len() <= BNDM_MAX_PATTERN_LEN {
+        BNDM::new(pattern).find_all(text).collect()
+    } else {
+        Horspool::new(pattern).find_all(text).collect()
+    }
 }
 
 fn find_in_strand_with_max_edits(

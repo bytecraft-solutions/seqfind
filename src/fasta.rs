@@ -1,3 +1,4 @@
+use crate::alphabets;
 use anyhow::{Context, Result};
 use noodles_fasta as fasta;
 use std::fs::File;
@@ -21,13 +22,14 @@ pub fn read_fasta(path: &Path) -> Result<Vec<FastaRecord>> {
         let name = String::from_utf8(record.name().to_vec())
             .with_context(|| format!("invalid FASTA record name in {}", path.display()))?;
 
-        let sequence = record
+        let sequence: String = record
             .sequence()
             .as_ref()
             .iter()
             .map(|b| b.to_ascii_uppercase() as char)
             .collect();
 
+        alphabets::warn_if_invalid(&name, &sequence);
         records.push(FastaRecord { name, sequence });
     }
 
